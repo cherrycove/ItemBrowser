@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>com.github.cherrycove.ItemBrowser</AssemblyName>
+    <AssemblyTitle>ItemBrowser</AssemblyTitle>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="ItemNameKeyMap.json">
+      <LogicalName>ItemNameKeyMap.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Localized_Text.json">
+      <LogicalName>Localized_Text.json</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="PEAKLib.Core">
+      <HintPath>$(PeakPluginsDir)PEAKLib.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="PEAKLib.UI">
+      <HintPath>$(PeakPluginsDir)PEAKLib.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
