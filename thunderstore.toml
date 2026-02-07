@@ -16,18 +16,18 @@ PEAKModding-PEAKLib_UI = "1.6.1"
 [build]
 icon = "./icon.png"
 readme = "./README.md"
-outdir = "../../artifacts/thunderstore/"
+outdir = "./artifacts/thunderstore/"
 
 [[build.copy]]
 source = "./artifacts/bin/ItemBrowser/release/com.github.cherrycove.ItemBrowser.dll"
 target = "plugins/com.github.cherrycove.ItemBrowser.dll"
 
 [[build.copy]]
-source = "../../CHANGELOG.md"
+source = "./CHANGELOG.md"
 target = "/"
 
 [[build.copy]]
-source = "../../LICENSE"
+source = "./LICENSE"
 target = "/"
 
 [publish]
