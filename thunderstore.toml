@@ -1,0 +1,38 @@
+[config]
+schemaVersion = "0.0.1"
+
+[package]
+namespace = "cherrycove"
+name = "ItemBrowser"
+versionNumber = "0.2.0"
+description = "In-game item browser for PEAK with search, categories, multilingual UI, and spawn-on-click (F5)."
+websiteUrl = "https://github.com/cherrycove/ItemBrowser"
+containsNsfwContent = false
+[package.dependencies]
+BepInEx-BepInExPack_PEAK = "5.4.2403"
+PEAKModding-PEAKLib_Core = "1.7.2"
+PEAKModding-PEAKLib_UI = "1.6.1"
+
+[build]
+icon = "./icon.png"
+readme = "./README.md"
+outdir = "../../artifacts/thunderstore/"
+
+[[build.copy]]
+source = "./artifacts/bin/ItemBrowser/release/com.github.cherrycove.ItemBrowser.dll"
+target = "plugins/com.github.cherrycove.ItemBrowser.dll"
+
+[[build.copy]]
+source = "../../CHANGELOG.md"
+target = "/"
+
+[[build.copy]]
+source = "../../LICENSE"
+target = "/"
+
+[publish]
+repository = "https://thunderstore.io"
+communities = ["peak"]
+
+[publish.categories]
+peak = ["mods"]
