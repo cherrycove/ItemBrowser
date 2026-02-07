@@ -18,11 +18,11 @@
 
   <ItemGroup>
     <Reference Include="PEAKLib.Core">
-      <HintPath>$(PeakPluginsDir)PEAKLib.Core.dll</HintPath>
+      <HintPath>$(PeakPluginsDir)com.github.PEAKModding.PEAKLib.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="PEAKLib.UI">
-      <HintPath>$(PeakPluginsDir)PEAKLib.UI.dll</HintPath>
+      <HintPath>$(PeakPluginsDir)com.github.PEAKModding.PEAKLib.UI.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
