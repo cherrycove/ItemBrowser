@@ -1,20 +1,26 @@
 # ItemBrowser
 
-An in-game item browser for PEAK using PEAKLib.UI.
+An in-game item browser and spawner for PEAK, built with PEAKLib.UI.
+
+![ItemBrowser UI Preview](readme-preview.png)
 
 ## Features
-- Press F4 to open/close the browser.
-- Search by localized name or prefab name.
-- Categories: Consumable, Cookable, Weapon, Tool, Misc.
-- Click an entry to spawn it in front of you.
+- Press `F5` to open/close the browser.
+- Search by localized item name or prefab name.
+- Two-level filtering: `All / Food / Weapon`, with sub-categories for Food and Weapon.
+- Click an entry to spawn it in front of your character.
+- Multilingual UI support:
+  - Item names are resolved from game localization keys via `ItemNameKeyMap.json`.
+  - Mod-specific texts are loaded from `Localized_Text.json` and injected into `LocalizedText.MAIN_TABLE`.
+  - UI labels refresh to the current game language when opening the browser.
 
 ## Usage
-- Launch the game with BepInEx.
-- Press F4 in a match to open the browser.
+- Launch PEAK with BepInEx.
+- Enter a match, then press `F5` to open ItemBrowser.
 
 ## Build
 ```sh
 dotnet build -c Release
 ```
 
-The Thunderstore package will be generated in `artifacts/thunderstore/` when running the Release build with the tcli tool.
+Thunderstore package output is generated under `artifacts/thunderstore/` when building Release with tcli.
