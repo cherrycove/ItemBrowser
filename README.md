@@ -2,7 +2,9 @@
 
 An in-game item browser and spawner for PEAK, built with PEAKLib.UI.
 
-![ItemBrowser UI Preview](readme-preview.png)
+![ItemBrowser UI Preview (ZH)](https://raw.githubusercontent.com/cherrycove/ItemBrowser/main/readme-preview-zh.png)
+
+![ItemBrowser UI Preview (EN)](https://raw.githubusercontent.com/cherrycove/ItemBrowser/main/readme-preview.png)
 
 ## Features
 - Press `F5` to open/close the browser.
