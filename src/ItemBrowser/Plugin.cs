@@ -47,9 +47,22 @@ public partial class Plugin : BaseUnityPlugin
     private static int itemPreloadProcessedCount;
     private static int itemPreloadAddedCount;
     private static float nextPreloadCheckTime;
+    private static float nextUIWarmupCheckTime;
+    private static int preloadingDatabaseId;
+    private static int loadedDatabaseId;
+    private static int itemNamesLanguageIndex = -1;
+    private static string itemNamesLanguageMarker = string.Empty;
+    private static string lastLanguageMarker = string.Empty;
 
     private static bool uiBuilt;
     private static bool pageOpen;
+    private static bool listNeedsRefresh = true;
+    private static bool listRenderRunning;
+    private static bool firstOpenPrimed;
+    private static bool hiddenMenuWindowPrimed;
+    private static bool postSpawnPrimeLocked;
+    private static float nextHiddenPrimeCheckTime;
+    private static float nextPostSpawnPrimeCheckTime;
     private static string currentSearch = string.Empty;
     private static MajorCategory currentMajorFilter = MajorCategory.All;
     private static ItemCategory? currentSubCategoryFilter;
@@ -70,6 +83,8 @@ public partial class Plugin : BaseUnityPlugin
     private static bool textureNameIndexBuilt;
     private static GridLayoutGroup? itemGridLayout;
     private static bool itemListInitialized;
+    private static Coroutine? listRenderCoroutine;
+    private static int listRenderGeneration;
 
     private static readonly Dictionary<string, string> itemNameKeyMap = new(StringComparer.OrdinalIgnoreCase);
     private static bool itemNameKeyMapInitialized;
@@ -116,7 +131,7 @@ public partial class Plugin : BaseUnityPlugin
         public string PrefabName { get; }
         public string DisplayName { get; private set; } = string.Empty;
         public ItemCategory Category { get; }
-        public Sprite? Icon { get; }
+        public Sprite? Icon { get; private set; }
         public string SearchText { get; private set; } = string.Empty;
 
         public ItemEntry(Item prefab, string displayName, ItemCategory category, Sprite? icon)
@@ -126,6 +141,11 @@ public partial class Plugin : BaseUnityPlugin
             Category = category;
             Icon = icon;
             UpdateDisplayName(displayName);
+        }
+
+        public void UpdateIcon(Sprite? icon)
+        {
+            Icon = icon;
         }
 
         public void UpdateDisplayName(string displayName)
@@ -162,11 +182,23 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         itemPreloadRunning = false;
+
+        if (listRenderCoroutine != null)
+        {
+            StopCoroutine(listRenderCoroutine);
+            listRenderCoroutine = null;
+        }
+
+        listRenderRunning = false;
     }
 
     private void Update()
     {
+        ValidateRuntimeState();
+        TickBackgroundUIWarmup();
         TickBackgroundItemPreload();
+        TickHiddenFirstOpenPrime();
+        TickPostSpawnPrimeLock();
 
         if (!IsTogglePressed())
         {
@@ -174,6 +206,128 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         ToggleUI();
+    }
+
+    private static void ValidateRuntimeState()
+    {
+        if (uiBuilt && page == null)
+        {
+            ResetUIRuntimeState("Cached UI page was destroyed.");
+        }
+
+        var db = SingletonAsset<ItemDatabase>.Instance;
+        if (db == null || db.Objects == null || db.Objects.Count == 0)
+        {
+            return;
+        }
+
+        int dbId = db.GetInstanceID();
+
+        if (itemPreloadRunning && preloadingDatabaseId != 0 && preloadingDatabaseId != dbId)
+        {
+            InvalidateItemListState($"ItemDatabase changed while preloading ({preloadingDatabaseId}->{dbId}).");
+            return;
+        }
+
+        if (!itemPreloadRunning && itemListInitialized && loadedDatabaseId != 0 && loadedDatabaseId != dbId)
+        {
+            InvalidateItemListState($"ItemDatabase changed ({loadedDatabaseId}->{dbId}). Re-preloading.");
+        }
+    }
+
+    private static void TickBackgroundUIWarmup()
+    {
+        if (uiBuilt)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextUIWarmupCheckTime)
+        {
+            return;
+        }
+
+        nextUIWarmupCheckTime = Time.unscaledTime + 0.1f;
+
+        if (!IsUIReady(out _))
+        {
+            return;
+        }
+
+        BuildUI();
+        uiBuilt = true;
+        LogAvailableTemplates();
+        VerboseLog("UI warmup build completed.");
+    }
+
+    private static void ResetUIRuntimeState(string reason)
+    {
+        page = null;
+        headerTitleText = null;
+        closeMenuButton = null;
+        searchInput = null;
+        scrollContent = null;
+        majorTabs = null;
+        subCategoryTabs = null;
+        subCategoryTabsRoot = null;
+        topControlsRect = null;
+        listContainerRect = null;
+        listScrollbar = null;
+        itemGridLayout = null;
+        majorTabEntries.Clear();
+        subCategoryTabEntries.Clear();
+        uiBuilt = false;
+        pageOpen = false;
+        listNeedsRefresh = true;
+        listRenderRunning = false;
+        listRenderGeneration++;
+        firstOpenPrimed = false;
+        hiddenMenuWindowPrimed = false;
+        postSpawnPrimeLocked = false;
+        nextHiddenPrimeCheckTime = 0f;
+        nextPostSpawnPrimeCheckTime = 0f;
+
+        VerboseLog(reason);
+    }
+
+    private static void InvalidateItemListState(string reason)
+    {
+        if (itemPreloadCoroutine != null && instance != null)
+        {
+            instance.StopCoroutine(itemPreloadCoroutine);
+        }
+
+        itemPreloadCoroutine = null;
+        itemPreloadRunning = false;
+        itemListInitialized = false;
+        itemPreloadTotalCount = 0;
+        itemPreloadProcessedCount = 0;
+        itemPreloadAddedCount = 0;
+        preloadingDatabaseId = 0;
+        loadedDatabaseId = 0;
+        itemNamesLanguageIndex = -1;
+        itemNamesLanguageMarker = string.Empty;
+        listNeedsRefresh = true;
+        listRenderRunning = false;
+        listRenderGeneration++;
+        firstOpenPrimed = false;
+        hiddenMenuWindowPrimed = false;
+        postSpawnPrimeLocked = false;
+        nextHiddenPrimeCheckTime = 0f;
+        nextPostSpawnPrimeCheckTime = 0f;
+        itemEntries.Clear();
+        itemIconCache.Clear();
+        generatedTextureSpriteCache.Clear();
+        textureNameIndex.Clear();
+        textureNameIndexBuilt = false;
+
+        VerboseLog(reason);
+        MarkListDirty(reason);
+
+        if (pageOpen)
+        {
+            RefreshListIfNeeded(force: true);
+        }
     }
 
     private static void ToggleUI()
@@ -197,7 +351,12 @@ public partial class Plugin : BaseUnityPlugin
     {
         if (uiBuilt)
         {
-            return true;
+            if (page != null)
+            {
+                return true;
+            }
+
+            ResetUIRuntimeState("Cached UI page was destroyed.");
         }
 
         if (!IsUIReady(out string reason))
@@ -476,9 +635,9 @@ public partial class Plugin : BaseUnityPlugin
         page.SetOnOpen(() =>
         {
             pageOpen = true;
-            RefreshLanguageDependentContent(force: true);
+            RefreshLanguageDependentContent(force: false);
             EnsureItemList();
-            RefreshList();
+            RefreshListIfNeeded();
         });
 
         page.SetOnClose(() =>
@@ -531,6 +690,7 @@ public partial class Plugin : BaseUnityPlugin
             .ParentTo(headerContainer)
             .ExpandToParent();
         headerTitleText.TextMesh.alignment = TMPro.TextAlignmentOptions.Midline;
+        lastLanguageMarker = BuildLanguageMarker();
 
         closeMenuButton = MenuAPI
             .CreateMenuButton(GetTextOrFallback("CLOSE_BUTTON", "Close"))
@@ -728,6 +888,7 @@ public partial class Plugin : BaseUnityPlugin
         UpdateItemGridCellSize();
 
         page.gameObject.SetActive(false);
+        MarkListDirty("UI built");
     }
 
     private static RectTransform? GetListContent()
@@ -901,7 +1062,37 @@ public partial class Plugin : BaseUnityPlugin
     private static void OnSearchChanged(string query)
     {
         currentSearch = query ?? string.Empty;
+        MarkListDirty();
         RefreshList();
+    }
+
+    private static void MarkListDirty(string? reason = null)
+    {
+        listNeedsRefresh = true;
+        listRenderRunning = false;
+        listRenderGeneration++;
+
+        if (listRenderCoroutine != null && instance != null)
+        {
+            instance.StopCoroutine(listRenderCoroutine);
+            listRenderCoroutine = null;
+        }
+
+        firstOpenPrimed = false;
+        postSpawnPrimeLocked = false;
+
+        if (!string.IsNullOrWhiteSpace(reason))
+        {
+            VerboseLog($"List marked dirty: {reason}");
+        }
+    }
+
+    private static void RefreshListIfNeeded(bool force = false)
+    {
+        if (force || listNeedsRefresh)
+        {
+            RefreshList();
+        }
     }
 
     private static void RefreshList()
@@ -920,6 +1111,7 @@ public partial class Plugin : BaseUnityPlugin
             return;
         }
 
+        CancelListRender();
         ClearContent(listContent);
         ClearStatusTextOverlay();
 
@@ -948,23 +1140,83 @@ public partial class Plugin : BaseUnityPlugin
         if (filteredList.Count == 0)
         {
             AddStatusText(GetText("STATUS_EMPTY"));
+            listNeedsRefresh = false;
+            listRenderRunning = false;
             return;
         }
 
-        if (!currentSubCategoryFilter.HasValue)
+        if (currentSubCategoryFilter.HasValue)
         {
-            // SubCategory "All" keeps database order.
-            for (int i = 0; i < filteredList.Count; i++)
+            filteredList = filteredList.OrderBy(entry => entry.DisplayName).ToList();
+        }
+
+        listNeedsRefresh = false;
+        StartListRender(listContent, filteredList);
+    }
+
+    private static void StartListRender(RectTransform listContent, List<ItemEntry> entries)
+    {
+        if (listContent == null)
+        {
+            return;
+        }
+
+        int generation = ++listRenderGeneration;
+        if (instance == null)
+        {
+            for (int i = 0; i < entries.Count; i++)
             {
-                AddItemButton(filteredList[i]);
+                AddItemButton(entries[i]);
             }
+
+            listRenderRunning = false;
             return;
         }
 
-        foreach (var entry in filteredList.OrderBy(entry => entry.DisplayName))
+        listRenderRunning = true;
+        listRenderCoroutine = instance.StartCoroutine(RenderListGradually(generation, entries));
+    }
+
+    private static IEnumerator RenderListGradually(int generation, List<ItemEntry> entries)
+    {
+        const int itemsPerFrame = 10;
+        int budget = itemsPerFrame;
+
+        for (int i = 0; i < entries.Count; i++)
         {
-            AddItemButton(entry);
+            if (generation != listRenderGeneration)
+            {
+                yield break;
+            }
+
+            AddItemButton(entries[i]);
+
+            budget--;
+            if (budget <= 0)
+            {
+                budget = itemsPerFrame;
+                yield return null;
+            }
         }
+
+        if (generation == listRenderGeneration)
+        {
+            listRenderRunning = false;
+            listRenderCoroutine = null;
+        }
+    }
+
+    private static void CancelListRender()
+    {
+        listRenderGeneration++;
+
+        if (listRenderCoroutine != null && instance != null)
+        {
+            instance.StopCoroutine(listRenderCoroutine);
+            listRenderCoroutine = null;
+        }
+
+        listRenderRunning = false;
     }
 
     private static void AddCategoryHeader(ItemCategory category)
@@ -1022,9 +1274,27 @@ public partial class Plugin : BaseUnityPlugin
         layout.minWidth = 0f;
         layout.flexibleWidth = 0f;
 
-        AddItemIcon(button, entry.Icon);
+        Sprite? icon = ResolveEntryIcon(entry);
+        AddItemIcon(button, icon);
         ApplyItemButtonStyle(button);
         NormalizeButtonLayout(button);
+    }
+
+    private static Sprite? ResolveEntryIcon(ItemEntry entry)
+    {
+        if (entry.Icon != null)
+        {
+            return entry.Icon;
+        }
+
+        // Keep preload lightweight: do expensive icon fallback only when an item is actually visible.
+        Sprite? icon = GetItemIcon(entry.Prefab, allowHeavyFallback: true);
+        if (icon != null)
+        {
+            entry.UpdateIcon(icon);
+        }
+
+        return icon;
     }
 
     private static void ApplyItemButtonStyle(PeakMenuButton button)
@@ -1184,14 +1454,107 @@ public partial class Plugin : BaseUnityPlugin
             return;
         }
 
-        nextPreloadCheckTime = Time.unscaledTime + 1f;
+        nextPreloadCheckTime = Time.unscaledTime + 0.1f;
+        TryStartBackgroundItemPreload("AutoWarmup");
+    }
 
-        if (!IsUIReady(out _))
+    private static void TickHiddenFirstOpenPrime()
+    {
+        if (firstOpenPrimed || pageOpen || !uiBuilt || scrollContent == null)
         {
             return;
         }
 
-        TryStartBackgroundItemPreload("AutoWarmup");
+        if (!itemListInitialized || itemPreloadRunning)
+        {
+            return;
+        }
+
+        if (Character.localCharacter != null)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextHiddenPrimeCheckTime)
+        {
+            return;
+        }
+
+        nextHiddenPrimeCheckTime = Time.unscaledTime + 0.25f;
+
+        RefreshLanguageDependentContent(force: false);
+        RefreshListIfNeeded();
+
+        // Prime MenuWindow open/close before player spawns so first manual F5 is already warmed up.
+        if (!hiddenMenuWindowPrimed && Character.localCharacter == null)
+        {
+            PrimeMenuWindowOpenClose();
+        }
+
+        if (!listNeedsRefresh && !listRenderRunning)
+        {
+            firstOpenPrimed = true;
+            VerboseLog("Hidden first-open cache primed.");
+        }
+    }
+
+    private static void PrimeMenuWindowOpenClose()
+    {
+        if (hiddenMenuWindowPrimed || page == null || pageOpen)
+        {
+            return;
+        }
+
+        try
+        {
+            OpenPage();
+            ClosePage();
+            hiddenMenuWindowPrimed = true;
+            VerboseLog("Menu window warmup completed before first manual F5.");
+        }
+        catch (Exception e)
+        {
+            VerboseLog($"Menu window warmup failed: {e.GetType().Name} {e.Message}");
+        }
+    }
+
+    private static void TickPostSpawnPrimeLock()
+    {
+        if (postSpawnPrimeLocked || pageOpen || !uiBuilt || scrollContent == null)
+        {
+            return;
+        }
+
+        if (Character.localCharacter == null)
+        {
+            return;
+        }
+
+        if (!itemListInitialized || itemPreloadRunning)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextPostSpawnPrimeCheckTime)
+        {
+            return;
+        }
+
+        nextPostSpawnPrimeCheckTime = Time.unscaledTime + 0.25f;
+
+        RefreshLanguageDependentContent(force: false);
+        RefreshListIfNeeded();
+
+        if (!hiddenMenuWindowPrimed)
+        {
+            PrimeMenuWindowOpenClose();
+        }
+
+        if (!listNeedsRefresh && !listRenderRunning && hiddenMenuWindowPrimed)
+        {
+            postSpawnPrimeLocked = true;
+            VerboseLog("Post-spawn prime lock completed.");
+        }
     }
 
     private static bool TryStartBackgroundItemPreload(string reason)
@@ -1215,20 +1578,30 @@ public partial class Plugin : BaseUnityPlugin
         itemEntries.Clear();
         itemIconCache.Clear();
 
+        MarkListDirty($"Item preload started ({reason})");
+
         itemPreloadTotalCount = db.Objects.Count;
         itemPreloadProcessedCount = 0;
         itemPreloadAddedCount = 0;
         itemPreloadRunning = true;
-        itemPreloadCoroutine = instance.StartCoroutine(BuildItemListGradually(db));
+        itemNamesLanguageIndex = GetCurrentLanguageIndex();
+        itemNamesLanguageMarker = BuildLanguageMarker();
+        int dbId = db.GetInstanceID();
+        preloadingDatabaseId = dbId;
+        loadedDatabaseId = 0;
+        itemPreloadCoroutine = instance.StartCoroutine(BuildItemListGradually(db, dbId));
 
         VerboseLog($"Item preload started ({reason}). Total={itemPreloadTotalCount}");
         return true;
     }
 
-    private static IEnumerator BuildItemListGradually(ItemDatabase db)
+    private static IEnumerator BuildItemListGradually(ItemDatabase db, int dbId)
     {
-        const int itemsPerFrame = 6;
+        const int itemsPerFrame = 4;
         int budget = itemsPerFrame;
+
+        // Yield once to avoid doing preload work in the same frame that triggered F5/UI open.
+        yield return null;
 
         foreach (var item in db.Objects)
         {
@@ -1245,7 +1618,7 @@ public partial class Plugin : BaseUnityPlugin
                     if (!ShouldHideItemFromBrowser(item, displayName))
                     {
                         ItemCategory category = GetCategory(item, displayName);
-                        Sprite? icon = GetItemIcon(item);
+                        Sprite? icon = GetItemIcon(item, allowHeavyFallback: false);
                         itemEntries.Add(new ItemEntry(item, displayName, category, icon));
                         itemPreloadAddedCount++;
                     }
@@ -1264,11 +1637,6 @@ public partial class Plugin : BaseUnityPlugin
             if (budget <= 0)
             {
                 budget = itemsPerFrame;
-                if (pageOpen)
-                {
-                    RefreshList();
-                }
-
                 yield return null;
             }
         }
@@ -1276,8 +1644,8 @@ public partial class Plugin : BaseUnityPlugin
         itemPreloadRunning = false;
         itemPreloadCoroutine = null;
         itemListInitialized = true;
-
-        RefreshItemDisplayNamesForCurrentLanguage();
+        loadedDatabaseId = preloadingDatabaseId != 0 ? preloadingDatabaseId : dbId;
+        preloadingDatabaseId = 0;
 
         if (configVerboseLogs != null && configVerboseLogs.Value)
         {
@@ -1288,9 +1656,11 @@ public partial class Plugin : BaseUnityPlugin
             Log.LogInfo($"[ItemBrowser] Item list built in background. Total={itemEntries.Count}, Added={itemPreloadAddedCount}, Categories: {string.Join(", ", breakdown)}");
         }
 
+        MarkListDirty("Item preload completed");
+
         if (pageOpen)
         {
-            RefreshList();
+            RefreshListIfNeeded();
         }
     }
 
@@ -1309,7 +1679,7 @@ public partial class Plugin : BaseUnityPlugin
         return GetText("STATUS_NOT_READY");
     }
 
-    private static Sprite? GetItemIcon(Item item)
+    private static Sprite? GetItemIcon(Item item, bool allowHeavyFallback = true)
     {
         if (item == null)
         {
@@ -1369,12 +1739,12 @@ public partial class Plugin : BaseUnityPlugin
                 }
             }
 
-            if (icon == null)
+            if (allowHeavyFallback && icon == null)
             {
                 icon = TryFindTextureByName(item, probe);
             }
 
-            if (icon == null)
+            if (allowHeavyFallback && icon == null)
             {
                 icon = TryExtractMaterialTextureSprite(item, probe);
             }
@@ -2857,7 +3227,8 @@ public partial class Plugin : BaseUnityPlugin
             UpdateMajorTabs();
             RebuildSubCategoryTabs();
             UpdateSubCategoryVisibility();
-            RefreshList();
+            MarkListDirty("Major category changed");
+            RefreshListIfNeeded(force: true);
         });
 
         ApplyMajorTabStyle(tabEntry, category == currentMajorFilter);
@@ -2926,7 +3297,8 @@ public partial class Plugin : BaseUnityPlugin
         {
             currentSubCategoryFilter = category;
             UpdateSubCategoryTabs();
-            RefreshList();
+            MarkListDirty("Sub category changed");
+            RefreshListIfNeeded(force: true);
         });
 
         ApplySubCategoryTabStyle(tabEntry, category == currentSubCategoryFilter);
@@ -3008,16 +3380,22 @@ public partial class Plugin : BaseUnityPlugin
     private static void RefreshLanguageDependentContent(bool force = false)
     {
         int languageIndex = GetCurrentLanguageIndex();
-        if (!force && languageIndex == lastRenderedLanguageIndex)
+        string titleText = GetText("TITLE");
+        string searchPlaceholder = GetText("SEARCH_PLACEHOLDER");
+        string languageMarker = BuildLanguageMarker(titleText, searchPlaceholder);
+        bool languageChanged = !string.Equals(languageMarker, lastLanguageMarker, StringComparison.Ordinal);
+
+        if (!force && !languageChanged)
         {
             return;
         }
 
+        lastLanguageMarker = languageMarker;
         lastRenderedLanguageIndex = languageIndex;
 
         if (headerTitleText != null)
         {
-            headerTitleText.TextMesh.text = GetText("TITLE");
+            headerTitleText.TextMesh.text = titleText;
         }
 
         if (closeMenuButton?.Text != null)
@@ -3027,7 +3405,7 @@ public partial class Plugin : BaseUnityPlugin
 
         if (searchInput != null)
         {
-            searchInput.SetPlaceholder(GetText("SEARCH_PLACEHOLDER"));
+            searchInput.SetPlaceholder(searchPlaceholder);
         }
 
         for (int i = 0; i < majorTabEntries.Count; i++)
@@ -3043,12 +3421,22 @@ public partial class Plugin : BaseUnityPlugin
             tab.Label.TextMesh.text = text;
         }
 
-        RefreshItemDisplayNamesForCurrentLanguage();
+        RefreshItemDisplayNamesForCurrentLanguage(force: false, currentLanguageMarker: languageMarker);
+        MarkListDirty("Language changed");
     }
 
-    private static void RefreshItemDisplayNamesForCurrentLanguage()
+    private static void RefreshItemDisplayNamesForCurrentLanguage(bool force = false, string? currentLanguageMarker = null)
     {
         if (!itemListInitialized || itemEntries.Count == 0)
+        {
+            return;
+        }
+
+        int languageIndex = GetCurrentLanguageIndex();
+        currentLanguageMarker ??= BuildLanguageMarker();
+        bool markerChanged = !string.Equals(currentLanguageMarker, itemNamesLanguageMarker, StringComparison.Ordinal);
+
+        if (!force && !markerChanged && languageIndex == itemNamesLanguageIndex)
         {
             return;
         }
@@ -3068,7 +3456,19 @@ public partial class Plugin : BaseUnityPlugin
             }
         }
 
-        VerboseLog($"Language refresh complete. index={lastRenderedLanguageIndex}, renamed={renamedCount}, total={itemEntries.Count}");
+        itemNamesLanguageIndex = languageIndex;
+        itemNamesLanguageMarker = currentLanguageMarker;
+        VerboseLog($"Language refresh complete. index={languageIndex}, renamed={renamedCount}, total={itemEntries.Count}, markerChanged={markerChanged}");
+    }
+
+    private static string BuildLanguageMarker()
+    {
+        return BuildLanguageMarker(GetText("TITLE"), GetText("SEARCH_PLACEHOLDER"));
+    }
+
+    private static string BuildLanguageMarker(string titleText, string searchPlaceholder)
+    {
+        return $"{titleText}|{searchPlaceholder}";
     }
 
     private static void UpdateSubCategoryTabs()
@@ -3210,8 +3610,6 @@ public partial class Plugin : BaseUnityPlugin
     private static void OpenPage()
     {
         if (page == null) return;
-
-        RefreshLanguageDependentContent(force: true);
 
         if (menuWindowOpenMethod == null)
         {
@@ -3656,7 +4054,7 @@ public partial class Plugin : BaseUnityPlugin
                 object? value = prop.GetValue(null);
                 if (TryConvertLanguageIndex(value, out int index))
                 {
-                    return index;
+                    return NormalizeLanguageIndex(index);
                 }
             }
 
@@ -3667,7 +4065,7 @@ public partial class Plugin : BaseUnityPlugin
                 object? value = field.GetValue(null);
                 if (TryConvertLanguageIndex(value, out int index))
                 {
-                    return index;
+                    return NormalizeLanguageIndex(index);
                 }
             }
         }
@@ -3677,6 +4075,11 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         return 0;
+    }
+
+    private static int NormalizeLanguageIndex(int index)
+    {
+        return index < 0 ? 0 : index;
     }
 
     private static bool TryConvertLanguageIndex(object? value, out int index)
