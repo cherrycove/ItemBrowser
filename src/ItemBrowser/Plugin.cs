@@ -46,6 +46,12 @@ public partial class Plugin : BaseUnityPlugin
     private static int itemPreloadTotalCount;
     private static int itemPreloadProcessedCount;
     private static int itemPreloadAddedCount;
+    private static Coroutine? iconPrewarmCoroutine;
+    private static bool iconPrewarmRunning;
+    private static bool iconPrewarmCompleted;
+    private static int iconPrewarmProcessedCount;
+    private static int iconPrewarmResolvedCount;
+    private static float nextIconPrewarmCheckTime;
     private static float nextPreloadCheckTime;
     private static float nextUIWarmupCheckTime;
     private static int preloadingDatabaseId;
@@ -72,6 +78,7 @@ public partial class Plugin : BaseUnityPlugin
     private static GameObject? subCategoryTabsRoot;
     private static RectTransform? topControlsRect;
     private static RectTransform? listContainerRect;
+    private static ScrollRect? listScrollRect;
     private static Scrollbar? listScrollbar;
     private static readonly List<MajorCategoryTab> majorTabEntries = new();
     private static readonly List<CategoryTab> subCategoryTabEntries = new();
@@ -85,6 +92,27 @@ public partial class Plugin : BaseUnityPlugin
     private static bool itemListInitialized;
     private static Coroutine? listRenderCoroutine;
     private static int listRenderGeneration;
+    private static readonly List<PooledItemButton> itemButtonPool = new();
+    private static readonly List<ItemEntry> activeRenderEntries = new();
+    private static readonly List<int> virtualizedPendingDataIndices = new();
+    private static readonly List<PooledItemButton> virtualizedFreePoolButtons = new();
+    private static int virtualizedFirstDataIndex = -1;
+    private static float virtualizedCellWidth = 320f;
+    private static bool suppressScrollUpdate;
+    private static bool virtualizedScrollDirty;
+    private static float nextVirtualizedScrollApplyTime;
+    private static Coroutine? buttonPoolWarmupCoroutine;
+    private static bool buttonPoolWarmupRunning;
+    private static int buttonPoolWarmupTargetCount;
+    private static float nextButtonPoolWarmupCheckTime;
+
+    private const int VirtualizedColumnCount = 2;
+    private const float VirtualizedCellHeight = 72f;
+    private const float VirtualizedHorizontalSpacing = 12f;
+    private const float VirtualizedVerticalSpacing = 8f;
+    private const float VirtualizedPadding = 4f;
+    private const int VirtualizedOverscanRows = 2;
+    private const float VirtualizedScrollApplyInterval = 0.02f;
 
     private static readonly Dictionary<string, string> itemNameKeyMap = new(StringComparer.OrdinalIgnoreCase);
     private static bool itemNameKeyMapInitialized;
@@ -183,6 +211,15 @@ public partial class Plugin : BaseUnityPlugin
 
         itemPreloadRunning = false;
 
+        if (iconPrewarmCoroutine != null)
+        {
+            StopCoroutine(iconPrewarmCoroutine);
+            iconPrewarmCoroutine = null;
+        }
+
+        iconPrewarmRunning = false;
+        iconPrewarmCompleted = false;
+
         if (listRenderCoroutine != null)
         {
             StopCoroutine(listRenderCoroutine);
@@ -190,13 +227,24 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         listRenderRunning = false;
+
+        if (buttonPoolWarmupCoroutine != null)
+        {
+            StopCoroutine(buttonPoolWarmupCoroutine);
+            buttonPoolWarmupCoroutine = null;
+        }
+
+        buttonPoolWarmupRunning = false;
     }
 
     private void Update()
     {
         ValidateRuntimeState();
+        TickVirtualizedScrollApply();
         TickBackgroundUIWarmup();
         TickBackgroundItemPreload();
+        TickBackgroundIconPrewarm();
+        TickBackgroundButtonPoolWarmup();
         TickHiddenFirstOpenPrime();
         TickPostSpawnPrimeLock();
 
@@ -206,6 +254,22 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         ToggleUI();
+    }
+
+    private static void TickVirtualizedScrollApply()
+    {
+        if (!virtualizedScrollDirty || listRenderRunning)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextVirtualizedScrollApplyTime)
+        {
+            return;
+        }
+
+        nextVirtualizedScrollApplyTime = Time.unscaledTime + VirtualizedScrollApplyInterval;
+        UpdateVirtualizedVisibleWindow(force: false);
     }
 
     private static void ValidateRuntimeState()
@@ -272,8 +336,22 @@ public partial class Plugin : BaseUnityPlugin
         subCategoryTabsRoot = null;
         topControlsRect = null;
         listContainerRect = null;
+        listScrollRect = null;
         listScrollbar = null;
         itemGridLayout = null;
+        itemButtonPool.Clear();
+        activeRenderEntries.Clear();
+        virtualizedPendingDataIndices.Clear();
+        virtualizedFreePoolButtons.Clear();
+        virtualizedFirstDataIndex = -1;
+        virtualizedCellWidth = 320f;
+        suppressScrollUpdate = false;
+        virtualizedScrollDirty = false;
+        nextVirtualizedScrollApplyTime = 0f;
+        buttonPoolWarmupCoroutine = null;
+        buttonPoolWarmupRunning = false;
+        buttonPoolWarmupTargetCount = 0;
+        nextButtonPoolWarmupCheckTime = 0f;
         majorTabEntries.Clear();
         subCategoryTabEntries.Clear();
         uiBuilt = false;
@@ -286,8 +364,44 @@ public partial class Plugin : BaseUnityPlugin
         postSpawnPrimeLocked = false;
         nextHiddenPrimeCheckTime = 0f;
         nextPostSpawnPrimeCheckTime = 0f;
+        nextIconPrewarmCheckTime = 0f;
+        iconPrewarmProcessedCount = 0;
+        iconPrewarmResolvedCount = 0;
 
         VerboseLog(reason);
+    }
+
+    private sealed class PooledItemButton
+    {
+        public PeakMenuButton Button { get; }
+        public RectTransform ButtonRect { get; }
+        public Image IconImage { get; }
+        public ItemButtonBinder Binder { get; }
+        public int PoolIndex { get; }
+        public int BoundDataIndex { get; set; }
+
+        public PooledItemButton(PeakMenuButton button, RectTransform buttonRect, Image iconImage, ItemButtonBinder binder, int poolIndex)
+        {
+            Button = button;
+            ButtonRect = buttonRect;
+            IconImage = iconImage;
+            Binder = binder;
+            PoolIndex = poolIndex;
+            BoundDataIndex = -1;
+        }
+    }
+
+    private sealed class ItemButtonBinder : MonoBehaviour
+    {
+        public Item? Prefab;
+
+        public void HandleClick()
+        {
+            if (Prefab != null)
+            {
+                SpawnItem(Prefab);
+            }
+        }
     }
 
     private static void InvalidateItemListState(string reason)
@@ -297,8 +411,19 @@ public partial class Plugin : BaseUnityPlugin
             instance.StopCoroutine(itemPreloadCoroutine);
         }
 
+        if (iconPrewarmCoroutine != null && instance != null)
+        {
+            instance.StopCoroutine(iconPrewarmCoroutine);
+        }
+
         itemPreloadCoroutine = null;
         itemPreloadRunning = false;
+        iconPrewarmCoroutine = null;
+        iconPrewarmRunning = false;
+        iconPrewarmCompleted = false;
+        iconPrewarmProcessedCount = 0;
+        iconPrewarmResolvedCount = 0;
+        nextIconPrewarmCheckTime = 0f;
         itemListInitialized = false;
         itemPreloadTotalCount = 0;
         itemPreloadProcessedCount = 0;
@@ -320,6 +445,25 @@ public partial class Plugin : BaseUnityPlugin
         generatedTextureSpriteCache.Clear();
         textureNameIndex.Clear();
         textureNameIndexBuilt = false;
+        itemButtonPool.Clear();
+        activeRenderEntries.Clear();
+        virtualizedPendingDataIndices.Clear();
+        virtualizedFreePoolButtons.Clear();
+        virtualizedFirstDataIndex = -1;
+        virtualizedCellWidth = 320f;
+        suppressScrollUpdate = false;
+        virtualizedScrollDirty = false;
+        nextVirtualizedScrollApplyTime = 0f;
+        buttonPoolWarmupTargetCount = 0;
+        nextButtonPoolWarmupCheckTime = 0f;
+
+        if (buttonPoolWarmupCoroutine != null && instance != null)
+        {
+            instance.StopCoroutine(buttonPoolWarmupCoroutine);
+        }
+
+        buttonPoolWarmupCoroutine = null;
+        buttonPoolWarmupRunning = false;
 
         VerboseLog(reason);
         MarkListDirty(reason);
@@ -882,6 +1026,12 @@ public partial class Plugin : BaseUnityPlugin
             .SetOffsetMin(new Vector2(12f, 12f))
             .SetOffsetMax(new Vector2(-26f, -12f));
 
+        listScrollRect = scrollContent.GetComponent<ScrollRect>();
+        if (listScrollRect != null)
+        {
+            listScrollRect.onValueChanged.AddListener(_ => OnVirtualizedScrollChanged());
+        }
+
         SetupListScrollbar(listContainer);
 
         EnsureListLayoutReady();
@@ -920,6 +1070,24 @@ public partial class Plugin : BaseUnityPlugin
             // Content starts with VerticalLayoutGroup from PEAKLib; remove it to switch to grid layout.
             DestroyImmediate(contentLayout);
         }
+
+        var contentFitter = content.GetComponent<ContentSizeFitter>();
+        if (contentFitter != null)
+        {
+            // Virtualized list controls content height manually; ContentSizeFitter would shrink height to visible children.
+            DestroyImmediate(contentFitter);
+        }
+
+        content.anchorMin = new Vector2(0f, 1f);
+        content.anchorMax = new Vector2(1f, 1f);
+        content.pivot = new Vector2(0.5f, 1f);
+        Vector2 contentPos = content.anchoredPosition;
+        contentPos.x = 0f;
+        if (!suppressScrollUpdate)
+        {
+            contentPos.y = Mathf.Max(0f, contentPos.y);
+        }
+        content.anchoredPosition = contentPos;
 
         itemGridLayout = content.GetComponent<GridLayoutGroup>();
         if (itemGridLayout == null)
@@ -1057,6 +1225,9 @@ public partial class Plugin : BaseUnityPlugin
         scrollRect.verticalScrollbar = listScrollbar;
         scrollRect.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
         scrollRect.verticalScrollbarSpacing = 2f;
+        scrollRect.movementType = ScrollRect.MovementType.Clamped;
+        scrollRect.elasticity = 0f;
+        scrollRect.inertia = true;
     }
 
     private static void OnSearchChanged(string query)
@@ -1112,7 +1283,7 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         CancelListRender();
-        ClearContent(listContent);
+        HideAllPooledItemButtons();
         ClearStatusTextOverlay();
 
         if (!itemListInitialized)
@@ -1139,6 +1310,10 @@ public partial class Plugin : BaseUnityPlugin
         List<ItemEntry> filteredList = filtered.ToList();
         if (filteredList.Count == 0)
         {
+            activeRenderEntries.Clear();
+            virtualizedFirstDataIndex = -1;
+            ResetVirtualizedContentHeight(0);
+            HideAllPooledItemButtons();
             AddStatusText(GetText("STATUS_EMPTY"));
             listNeedsRefresh = false;
             listRenderRunning = false;
@@ -1150,6 +1325,8 @@ public partial class Plugin : BaseUnityPlugin
             filteredList = filteredList.OrderBy(entry => entry.DisplayName).ToList();
         }
 
+        activeRenderEntries.Clear();
+        activeRenderEntries.AddRange(filteredList);
         listNeedsRefresh = false;
         StartListRender(listContent, filteredList);
     }
@@ -1161,14 +1338,22 @@ public partial class Plugin : BaseUnityPlugin
             return;
         }
 
+        int targetVisiblePool = CalculateVirtualizedVisiblePoolTarget();
+        buttonPoolWarmupTargetCount = Math.Max(buttonPoolWarmupTargetCount, targetVisiblePool);
+
+        ResetVirtualizedContentHeight(entries.Count);
+        ResetVirtualizedScrollTop();
+
         int generation = ++listRenderGeneration;
         if (instance == null)
         {
-            for (int i = 0; i < entries.Count; i++)
+            int initialCount = Math.Min(entries.Count, targetVisiblePool);
+            for (int i = 0; i < initialCount; i++)
             {
-                AddItemButton(entries[i]);
+                RenderVirtualizedSlot(i, i, entries[i]);
             }
 
+            UpdateVirtualizedVisibleWindow(force: true);
             listRenderRunning = false;
             return;
         }
@@ -1179,17 +1364,40 @@ public partial class Plugin : BaseUnityPlugin
 
     private static IEnumerator RenderListGradually(int generation, List<ItemEntry> entries)
     {
-        const int itemsPerFrame = 10;
+        int visibleTarget = CalculateVirtualizedVisiblePoolTarget();
+        int renderCount = Math.Min(entries.Count, visibleTarget);
+
+        const int firstFrameItems = 2;
+        const int itemsPerFrame = 6;
         int budget = itemsPerFrame;
 
-        for (int i = 0; i < entries.Count; i++)
+        // Yield once to avoid doing first-batch list instantiation in the same frame as F5 open.
+        yield return null;
+
+        int initialBurst = Math.Min(renderCount, firstFrameItems);
+        for (int i = 0; i < initialBurst; i++)
         {
             if (generation != listRenderGeneration)
             {
                 yield break;
             }
 
-            AddItemButton(entries[i]);
+            RenderVirtualizedSlot(i, i, entries[i]);
+        }
+
+        if (initialBurst > 0)
+        {
+            yield return null;
+        }
+
+        for (int i = initialBurst; i < renderCount; i++)
+        {
+            if (generation != listRenderGeneration)
+            {
+                yield break;
+            }
+
+            RenderVirtualizedSlot(i, i, entries[i]);
 
             budget--;
             if (budget <= 0)
@@ -1201,8 +1409,386 @@ public partial class Plugin : BaseUnityPlugin
 
         if (generation == listRenderGeneration)
         {
+            virtualizedFirstDataIndex = 0;
+            UpdateVirtualizedVisibleWindow(force: true);
             listRenderRunning = false;
             listRenderCoroutine = null;
+        }
+    }
+
+    private static int CalculateVirtualizedVisiblePoolTarget()
+    {
+        float viewportHeight = 560f;
+
+        if (listScrollRect != null && listScrollRect.viewport != null)
+        {
+            viewportHeight = Mathf.Max(listScrollRect.viewport.rect.height, VirtualizedCellHeight);
+        }
+        else if (listContainerRect != null)
+        {
+            viewportHeight = Mathf.Max(listContainerRect.rect.height - 24f, VirtualizedCellHeight);
+        }
+
+        float rowStride = VirtualizedCellHeight + VirtualizedVerticalSpacing;
+        int visibleRows = Mathf.Max(1, Mathf.CeilToInt((viewportHeight + VirtualizedVerticalSpacing) / rowStride));
+        int totalRows = visibleRows + VirtualizedOverscanRows * 2;
+        return Mathf.Max(VirtualizedColumnCount * 2, totalRows * VirtualizedColumnCount);
+    }
+
+    private static void ResetVirtualizedContentHeight(int itemCount)
+    {
+        RectTransform? listContent = GetListContent();
+        if (listContent == null)
+        {
+            return;
+        }
+
+        int rowCount = itemCount <= 0
+            ? 0
+            : (itemCount + VirtualizedColumnCount - 1) / VirtualizedColumnCount;
+
+        float contentWidth = listContent.rect.width;
+        if (contentWidth <= 0f && listScrollRect != null && listScrollRect.viewport != null)
+        {
+            contentWidth = listScrollRect.viewport.rect.width;
+        }
+
+        if (contentWidth <= 0f)
+        {
+            contentWidth = 680f;
+        }
+
+        float availableWidth = contentWidth - (VirtualizedPadding * 2f) - VirtualizedHorizontalSpacing;
+        virtualizedCellWidth = Mathf.Clamp(availableWidth / VirtualizedColumnCount, 320f, 420f);
+
+        float contentHeight = VirtualizedPadding * 2f;
+        if (rowCount > 0)
+        {
+            contentHeight += (rowCount * VirtualizedCellHeight) + ((rowCount - 1) * VirtualizedVerticalSpacing);
+        }
+
+        if (listScrollRect != null && listScrollRect.viewport != null)
+        {
+            contentHeight = Mathf.Max(contentHeight, listScrollRect.viewport.rect.height + 1f);
+        }
+
+        Vector2 size = listContent.sizeDelta;
+        size.y = contentHeight;
+        listContent.sizeDelta = size;
+
+        if (itemGridLayout != null)
+        {
+            itemGridLayout.enabled = false;
+        }
+
+        ClampVirtualizedContentPosition(listContent, contentHeight);
+    }
+
+    private static void ResetVirtualizedScrollTop()
+    {
+        if (listScrollRect == null)
+        {
+            virtualizedFirstDataIndex = -1;
+            return;
+        }
+
+        suppressScrollUpdate = true;
+        listScrollRect.StopMovement();
+        listScrollRect.verticalNormalizedPosition = 1f;
+
+        RectTransform? listContent = GetListContent();
+        if (listContent != null)
+        {
+            Vector2 anchoredPos = listContent.anchoredPosition;
+            if (anchoredPos.y != 0f)
+            {
+                anchoredPos.y = 0f;
+                listContent.anchoredPosition = anchoredPos;
+            }
+        }
+
+        suppressScrollUpdate = false;
+        virtualizedFirstDataIndex = -1;
+    }
+
+    private static void OnVirtualizedScrollChanged()
+    {
+        if (suppressScrollUpdate || listRenderRunning)
+        {
+            return;
+        }
+
+        virtualizedScrollDirty = true;
+
+        float now = Time.unscaledTime;
+        bool hasMouseWheelInput = Mathf.Abs(Input.mouseScrollDelta.y) > 0.001f;
+        if (hasMouseWheelInput && now >= nextVirtualizedScrollApplyTime)
+        {
+            nextVirtualizedScrollApplyTime = now + VirtualizedScrollApplyInterval;
+            UpdateVirtualizedVisibleWindow(force: false);
+        }
+    }
+
+    private static void UpdateVirtualizedVisibleWindow(bool force)
+    {
+        if (activeRenderEntries.Count == 0 || scrollContent == null)
+        {
+            HideAllPooledItemButtons();
+            virtualizedFirstDataIndex = -1;
+            virtualizedScrollDirty = false;
+            nextVirtualizedScrollApplyTime = Time.unscaledTime + VirtualizedScrollApplyInterval;
+            return;
+        }
+
+        RectTransform? listContent = GetListContent();
+        if (listContent == null)
+        {
+            return;
+        }
+
+        int visibleTarget = CalculateVirtualizedVisiblePoolTarget();
+        int maxFirstIndex = Mathf.Max(0, activeRenderEntries.Count - visibleTarget);
+
+        float scrollY = Mathf.Max(0f, listContent.anchoredPosition.y - VirtualizedPadding);
+        float rowStride = VirtualizedCellHeight + VirtualizedVerticalSpacing;
+        int firstRow = Mathf.Max(0, Mathf.FloorToInt(scrollY / rowStride) - VirtualizedOverscanRows);
+        int firstIndex = Mathf.Clamp(firstRow * VirtualizedColumnCount, 0, maxFirstIndex);
+        if (firstIndex % VirtualizedColumnCount != 0)
+        {
+            firstIndex--;
+        }
+
+        if (!force && firstIndex == virtualizedFirstDataIndex && itemButtonPool.Count >= visibleTarget)
+        {
+            return;
+        }
+
+        int renderCount = Mathf.Min(visibleTarget, activeRenderEntries.Count - firstIndex);
+        int previousFirstIndex = virtualizedFirstDataIndex;
+        int previousLastIndex = previousFirstIndex >= 0
+            ? previousFirstIndex + Mathf.Min(visibleTarget, activeRenderEntries.Count - previousFirstIndex) - 1
+            : -1;
+        int currentLastIndex = renderCount > 0 ? firstIndex + renderCount - 1 : -1;
+
+        if (!force && previousFirstIndex >= 0 && currentLastIndex >= 0 && firstIndex != previousFirstIndex)
+        {
+            bool hasOverlap = !(currentLastIndex < previousFirstIndex || firstIndex > previousLastIndex);
+            if (hasOverlap)
+            {
+                bool incrementalApplied = BindVirtualizedWindowIncremental(previousFirstIndex, previousLastIndex, firstIndex, currentLastIndex, renderCount);
+                if (incrementalApplied)
+                {
+                    virtualizedFirstDataIndex = firstIndex;
+                    return;
+                }
+            }
+        }
+
+        for (int i = 0; i < renderCount; i++)
+        {
+            int dataIndex = firstIndex + i;
+            RenderVirtualizedSlot(i, dataIndex, activeRenderEntries[dataIndex]);
+        }
+
+        for (int i = renderCount; i < itemButtonPool.Count; i++)
+        {
+            itemButtonPool[i].Button.gameObject.SetActive(false);
+        }
+
+        virtualizedFirstDataIndex = firstIndex;
+        virtualizedScrollDirty = false;
+
+        float contentHeight = listContent.sizeDelta.y;
+        ClampVirtualizedContentPosition(listContent, contentHeight);
+    }
+
+    private static void ClampVirtualizedContentPosition(RectTransform listContent, float contentHeight)
+    {
+        if (listScrollRect == null || listScrollRect.viewport == null)
+        {
+            return;
+        }
+
+        float viewportHeight = Mathf.Max(1f, listScrollRect.viewport.rect.height);
+        float maxScroll = Mathf.Max(0f, contentHeight - viewportHeight);
+
+        Vector2 anchoredPos = listContent.anchoredPosition;
+        float clampedY = Mathf.Clamp(anchoredPos.y, 0f, maxScroll);
+        if (!Mathf.Approximately(clampedY, anchoredPos.y))
+        {
+            anchoredPos.y = clampedY;
+            listContent.anchoredPosition = anchoredPos;
+        }
+    }
+
+    private static bool BindVirtualizedWindowIncremental(
+        int previousFirstIndex,
+        int previousLastIndex,
+        int currentFirstIndex,
+        int currentLastIndex,
+        int renderCount)
+    {
+        virtualizedPendingDataIndices.Clear();
+        virtualizedFreePoolButtons.Clear();
+
+        for (int dataIndex = currentFirstIndex; dataIndex <= currentLastIndex; dataIndex++)
+        {
+            if (dataIndex < previousFirstIndex || dataIndex > previousLastIndex)
+            {
+                virtualizedPendingDataIndices.Add(dataIndex);
+            }
+        }
+
+        if (virtualizedPendingDataIndices.Count == 0)
+        {
+            return true;
+        }
+
+        int poolSearchCount = Mathf.Min(itemButtonPool.Count, renderCount);
+        for (int i = 0; i < poolSearchCount; i++)
+        {
+            PooledItemButton pooled = itemButtonPool[i];
+            int boundDataIndex = pooled.BoundDataIndex;
+            if (boundDataIndex < currentFirstIndex || boundDataIndex > currentLastIndex)
+            {
+                virtualizedFreePoolButtons.Add(pooled);
+            }
+        }
+
+        int assignCount = Mathf.Min(virtualizedPendingDataIndices.Count, virtualizedFreePoolButtons.Count);
+        if (assignCount < virtualizedPendingDataIndices.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < assignCount; i++)
+        {
+            int dataIndex = virtualizedPendingDataIndices[i];
+            PooledItemButton pooled = virtualizedFreePoolButtons[i];
+            pooled.BoundDataIndex = -1;
+            RenderVirtualizedSlotByButton(pooled, dataIndex, activeRenderEntries[dataIndex]);
+        }
+
+        return true;
+    }
+
+    private static void RenderVirtualizedSlotByButton(PooledItemButton pooled, int dataIndex, ItemEntry entry)
+    {
+        if (pooled == null)
+        {
+            return;
+        }
+
+        if (!pooled.Button.gameObject.activeSelf)
+        {
+            pooled.Button.gameObject.SetActive(true);
+        }
+
+        if (pooled.Button.Text != null)
+        {
+            pooled.Button.Text.text = entry.DisplayName;
+        }
+
+        pooled.Binder.Prefab = entry.Prefab;
+
+        Sprite? icon = ResolveEntryIcon(entry);
+        pooled.IconImage.sprite = icon;
+        pooled.IconImage.color = icon != null ? Color.white : new Color(0.48f, 0.42f, 0.35f, 0.45f);
+        pooled.BoundDataIndex = dataIndex;
+
+        if (pooled.PoolIndex >= 0)
+        {
+            PositionVirtualizedButton(pooled.PoolIndex, dataIndex);
+        }
+    }
+
+    private static void RenderVirtualizedSlot(int poolIndex, int dataIndex, ItemEntry entry)
+    {
+        if (poolIndex < 0)
+        {
+            return;
+        }
+
+        RectTransform? listContent = GetListContent();
+        if (listContent == null)
+        {
+            return;
+        }
+
+        PooledItemButton pooled = EnsurePooledItemButton(poolIndex, listContent);
+        if (!pooled.Button.gameObject.activeSelf)
+        {
+            pooled.Button.gameObject.SetActive(true);
+        }
+
+        bool needsRebind = pooled.BoundDataIndex != dataIndex;
+        if (needsRebind)
+        {
+            if (pooled.Button.Text != null)
+            {
+                pooled.Button.Text.text = entry.DisplayName;
+            }
+
+            pooled.Binder.Prefab = entry.Prefab;
+
+            Sprite? icon = ResolveEntryIcon(entry);
+            pooled.IconImage.sprite = icon;
+            pooled.IconImage.color = icon != null ? Color.white : new Color(0.48f, 0.42f, 0.35f, 0.45f);
+            pooled.BoundDataIndex = dataIndex;
+        }
+
+        PositionVirtualizedButton(poolIndex, dataIndex);
+    }
+
+    private static void PositionVirtualizedButton(int poolIndex, int dataIndex)
+    {
+        if (poolIndex < 0 || poolIndex >= itemButtonPool.Count)
+        {
+            return;
+        }
+
+        RectTransform? rect = itemButtonPool[poolIndex].ButtonRect;
+        if (rect == null)
+        {
+            return;
+        }
+
+        int row = dataIndex / VirtualizedColumnCount;
+        int column = dataIndex % VirtualizedColumnCount;
+        float x = VirtualizedPadding + column * (virtualizedCellWidth + VirtualizedHorizontalSpacing);
+        float y = VirtualizedPadding + row * (VirtualizedCellHeight + VirtualizedVerticalSpacing);
+
+        Vector2 anchorTopLeft = new Vector2(0f, 1f);
+        if (rect.anchorMin != anchorTopLeft)
+        {
+            rect.anchorMin = anchorTopLeft;
+        }
+
+        if (rect.anchorMax != anchorTopLeft)
+        {
+            rect.anchorMax = anchorTopLeft;
+        }
+
+        if (rect.pivot != anchorTopLeft)
+        {
+            rect.pivot = anchorTopLeft;
+        }
+
+        Vector2 targetSize = new Vector2(virtualizedCellWidth, VirtualizedCellHeight);
+        if (rect.sizeDelta != targetSize)
+        {
+            rect.sizeDelta = targetSize;
+        }
+
+        Vector2 targetPos = new Vector2(x, -y);
+        if (rect.anchoredPosition != targetPos)
+        {
+            rect.anchoredPosition = targetPos;
+        }
+
+        if (rect.localScale != Vector3.one)
+        {
+            rect.localScale = Vector3.one;
         }
     }
 
@@ -1217,6 +1803,72 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         listRenderRunning = false;
+    }
+
+    private static PooledItemButton EnsurePooledItemButton(int index, RectTransform listContent)
+    {
+        while (itemButtonPool.Count <= index)
+        {
+            var button = MenuAPI
+                .CreateMenuButton(string.Empty)
+                .ParentTo(listContent)
+                .OnClick(() => { });
+
+            var rect = button.GetComponent<RectTransform>();
+            if (rect != null)
+            {
+                rect.anchorMin = new Vector2(0f, 1f);
+                rect.anchorMax = new Vector2(1f, 1f);
+                rect.pivot = new Vector2(0.5f, 0.5f);
+                rect.sizeDelta = new Vector2(0f, 72f);
+                rect.localScale = Vector3.one;
+            }
+
+            var layout = button.gameObject.GetComponent<LayoutElement>();
+            if (layout == null)
+            {
+                layout = button.gameObject.AddComponent<LayoutElement>();
+            }
+
+            layout.preferredHeight = 72f;
+            layout.minHeight = 72f;
+            layout.flexibleHeight = 0f;
+            layout.preferredWidth = 0f;
+            layout.minWidth = 0f;
+            layout.flexibleWidth = 0f;
+
+            Image iconImage = CreateItemIconImage(button);
+            ApplyItemButtonStyle(button);
+            NormalizeButtonLayout(button);
+
+            var binder = button.gameObject.GetComponent<ItemButtonBinder>();
+            if (binder == null)
+            {
+                binder = button.gameObject.AddComponent<ItemButtonBinder>();
+            }
+
+            if (button.Button != null)
+            {
+                button.Button.onClick.RemoveAllListeners();
+                button.Button.onClick.AddListener(binder.HandleClick);
+            }
+
+            button.gameObject.SetActive(false);
+
+            RectTransform buttonRect = rect ?? button.GetComponent<RectTransform>();
+            itemButtonPool.Add(new PooledItemButton(button, buttonRect, iconImage, binder, itemButtonPool.Count));
+        }
+
+        return itemButtonPool[index];
+    }
+
+    private static void HideAllPooledItemButtons()
+    {
+        for (int i = 0; i < itemButtonPool.Count; i++)
+        {
+            itemButtonPool[i].Button.gameObject.SetActive(false);
+            itemButtonPool[i].BoundDataIndex = -1;
+        }
     }
 
     private static void AddCategoryHeader(ItemCategory category)
@@ -1235,7 +1887,7 @@ public partial class Plugin : BaseUnityPlugin
             .ParentTo(listContent);
     }
 
-    private static void AddItemButton(ItemEntry entry)
+    private static void RenderOrReuseItemButton(int index, ItemEntry entry)
     {
         if (scrollContent == null) return;
 
@@ -1245,12 +1897,10 @@ public partial class Plugin : BaseUnityPlugin
             return;
         }
 
-        string display = entry.DisplayName;
+        PooledItemButton pooled = EnsurePooledItemButton(index, listContent);
+        var button = pooled.Button;
 
-        var button = MenuAPI
-            .CreateMenuButton(display)
-            .ParentTo(listContent)
-            .OnClick(() => SpawnItem(entry.Prefab));
+        button.gameObject.SetActive(true);
 
         var rect = button.GetComponent<RectTransform>();
         if (rect != null)
@@ -1262,22 +1912,16 @@ public partial class Plugin : BaseUnityPlugin
             rect.localScale = Vector3.one;
         }
 
-        var layout = button.gameObject.GetComponent<LayoutElement>();
-        if (layout == null)
+        if (button.Text != null)
         {
-            layout = button.gameObject.AddComponent<LayoutElement>();
+            button.Text.text = entry.DisplayName;
         }
-        layout.preferredHeight = 72f;
-        layout.minHeight = 72f;
-        layout.flexibleHeight = 0f;
-        layout.preferredWidth = 0f;
-        layout.minWidth = 0f;
-        layout.flexibleWidth = 0f;
+
+        pooled.Binder.Prefab = entry.Prefab;
 
         Sprite? icon = ResolveEntryIcon(entry);
-        AddItemIcon(button, icon);
-        ApplyItemButtonStyle(button);
-        NormalizeButtonLayout(button);
+        pooled.IconImage.sprite = icon;
+        pooled.IconImage.color = icon != null ? Color.white : new Color(0.48f, 0.42f, 0.35f, 0.45f);
     }
 
     private static Sprite? ResolveEntryIcon(ItemEntry entry)
@@ -1287,14 +1931,9 @@ public partial class Plugin : BaseUnityPlugin
             return entry.Icon;
         }
 
-        // Keep preload lightweight: do expensive icon fallback only when an item is actually visible.
-        Sprite? icon = GetItemIcon(entry.Prefab, allowHeavyFallback: true);
-        if (icon != null)
-        {
-            entry.UpdateIcon(icon);
-        }
-
-        return icon;
+        // Defer expensive icon fallback to background prewarm to keep first-open frame smooth.
+        TryStartBackgroundIconPrewarm("VisibleEntryFallback");
+        return null;
     }
 
     private static void ApplyItemButtonStyle(PeakMenuButton button)
@@ -1332,11 +1971,11 @@ public partial class Plugin : BaseUnityPlugin
         }
     }
 
-    private static void AddItemIcon(PeakMenuButton button, Sprite? icon)
+    private static Image CreateItemIconImage(PeakMenuButton button)
     {
         if (button == null)
         {
-            return;
+            throw new ArgumentNullException(nameof(button));
         }
 
         var iconObj = new GameObject("ItemIcon", typeof(RectTransform), typeof(Image));
@@ -1350,18 +1989,10 @@ public partial class Plugin : BaseUnityPlugin
         iconRect.sizeDelta = new Vector2(48f, 48f);
 
         var iconImage = iconObj.GetComponent<Image>();
-        iconImage.sprite = icon;
         iconImage.preserveAspect = true;
         iconImage.raycastTarget = false;
 
-        if (icon != null)
-        {
-            iconImage.color = Color.white;
-        }
-        else
-        {
-            iconImage.color = new Color(0.48f, 0.42f, 0.35f, 0.45f);
-        }
+        return iconImage;
     }
 
     private static void ClearStatusTextOverlay()
@@ -1458,6 +2089,60 @@ public partial class Plugin : BaseUnityPlugin
         TryStartBackgroundItemPreload("AutoWarmup");
     }
 
+    private static void TickBackgroundIconPrewarm()
+    {
+        if (!itemListInitialized || itemPreloadRunning || iconPrewarmRunning || iconPrewarmCompleted)
+        {
+            return;
+        }
+
+        if (pageOpen)
+        {
+            // Keep UI interaction smooth while browser is visible.
+            return;
+        }
+
+        if (itemEntries.Count == 0)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextIconPrewarmCheckTime)
+        {
+            return;
+        }
+
+        nextIconPrewarmCheckTime = Time.unscaledTime + 0.15f;
+        TryStartBackgroundIconPrewarm("AutoWarmup");
+    }
+
+    private static void TickBackgroundButtonPoolWarmup()
+    {
+        if (!itemListInitialized || itemPreloadRunning || buttonPoolWarmupRunning)
+        {
+            return;
+        }
+
+        if (pageOpen)
+        {
+            return;
+        }
+
+        int targetCount = CalculateButtonPoolWarmupTarget(itemEntries.Count);
+        if (targetCount <= 0 || itemButtonPool.Count >= targetCount)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextButtonPoolWarmupCheckTime)
+        {
+            return;
+        }
+
+        nextButtonPoolWarmupCheckTime = Time.unscaledTime + 0.2f;
+        TryStartBackgroundButtonPoolWarmup("AutoWarmup", targetCount);
+    }
+
     private static void TickHiddenFirstOpenPrime()
     {
         if (firstOpenPrimed || pageOpen || !uiBuilt || scrollContent == null)
@@ -1508,7 +2193,17 @@ public partial class Plugin : BaseUnityPlugin
         try
         {
             OpenPage();
+            Canvas.ForceUpdateCanvases();
+
+            RectTransform? content = GetListContent();
+            if (content != null)
+            {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(content);
+            }
+
             ClosePage();
+            Canvas.ForceUpdateCanvases();
+
             hiddenMenuWindowPrimed = true;
             VerboseLog("Menu window warmup completed before first manual F5.");
         }
@@ -1530,25 +2225,25 @@ public partial class Plugin : BaseUnityPlugin
             return;
         }
 
-        if (!itemListInitialized || itemPreloadRunning)
-        {
-            return;
-        }
-
         if (Time.unscaledTime < nextPostSpawnPrimeCheckTime)
         {
             return;
         }
 
-        nextPostSpawnPrimeCheckTime = Time.unscaledTime + 0.25f;
-
-        RefreshLanguageDependentContent(force: false);
-        RefreshListIfNeeded();
+        nextPostSpawnPrimeCheckTime = Time.unscaledTime + 0.1f;
 
         if (!hiddenMenuWindowPrimed)
         {
             PrimeMenuWindowOpenClose();
         }
+
+        if (!itemListInitialized || itemPreloadRunning)
+        {
+            return;
+        }
+
+        RefreshLanguageDependentContent(force: false);
+        RefreshListIfNeeded();
 
         if (!listNeedsRefresh && !listRenderRunning && hiddenMenuWindowPrimed)
         {
@@ -1577,6 +2272,31 @@ public partial class Plugin : BaseUnityPlugin
 
         itemEntries.Clear();
         itemIconCache.Clear();
+        generatedTextureSpriteCache.Clear();
+        textureNameIndex.Clear();
+        textureNameIndexBuilt = false;
+
+        if (iconPrewarmCoroutine != null)
+        {
+            instance.StopCoroutine(iconPrewarmCoroutine);
+        }
+
+        iconPrewarmCoroutine = null;
+        iconPrewarmRunning = false;
+        iconPrewarmCompleted = false;
+        iconPrewarmProcessedCount = 0;
+        iconPrewarmResolvedCount = 0;
+        nextIconPrewarmCheckTime = 0f;
+        buttonPoolWarmupTargetCount = 0;
+        nextButtonPoolWarmupCheckTime = 0f;
+
+        if (buttonPoolWarmupCoroutine != null)
+        {
+            instance.StopCoroutine(buttonPoolWarmupCoroutine);
+        }
+
+        buttonPoolWarmupCoroutine = null;
+        buttonPoolWarmupRunning = false;
 
         MarkListDirty($"Item preload started ({reason})");
 
@@ -1658,10 +2378,137 @@ public partial class Plugin : BaseUnityPlugin
 
         MarkListDirty("Item preload completed");
 
+        TryStartBackgroundIconPrewarm("PostPreload");
+        TryStartBackgroundButtonPoolWarmup("PostPreload", CalculateButtonPoolWarmupTarget(itemEntries.Count));
+
         if (pageOpen)
         {
             RefreshListIfNeeded();
         }
+    }
+
+    private static bool TryStartBackgroundIconPrewarm(string reason)
+    {
+        if (!itemListInitialized || itemPreloadRunning || iconPrewarmRunning || iconPrewarmCompleted)
+        {
+            return false;
+        }
+
+        if (instance == null || itemEntries.Count == 0)
+        {
+            return false;
+        }
+
+        iconPrewarmRunning = true;
+        iconPrewarmProcessedCount = 0;
+        iconPrewarmResolvedCount = 0;
+        iconPrewarmCoroutine = instance.StartCoroutine(WarmupMissingIconsGradually(reason));
+        VerboseLog($"Icon prewarm started ({reason}). Entries={itemEntries.Count}");
+        return true;
+    }
+
+    private static IEnumerator WarmupMissingIconsGradually(string reason)
+    {
+        const int itemsPerFrame = 1;
+        int budget = itemsPerFrame;
+
+        // Yield once to avoid doing heavy icon fallback in the same frame that started this warmup.
+        yield return null;
+
+        for (int i = 0; i < itemEntries.Count; i++)
+        {
+            ItemEntry entry = itemEntries[i];
+            iconPrewarmProcessedCount++;
+
+            if (entry.Icon == null)
+            {
+                Sprite? icon = GetItemIcon(entry.Prefab, allowHeavyFallback: true);
+                if (icon != null)
+                {
+                    entry.UpdateIcon(icon);
+                    iconPrewarmResolvedCount++;
+                }
+            }
+
+            budget--;
+            if (budget <= 0)
+            {
+                budget = itemsPerFrame;
+                yield return null;
+            }
+        }
+
+        iconPrewarmRunning = false;
+        iconPrewarmCoroutine = null;
+        iconPrewarmCompleted = true;
+        VerboseLog($"Icon prewarm completed ({reason}). Processed={iconPrewarmProcessedCount}, Resolved={iconPrewarmResolvedCount}");
+    }
+
+    private static bool TryStartBackgroundButtonPoolWarmup(string reason, int targetCount)
+    {
+        if (buttonPoolWarmupRunning)
+        {
+            return false;
+        }
+
+        if (instance == null || scrollContent == null)
+        {
+            return false;
+        }
+
+        RectTransform? listContent = GetListContent();
+        if (listContent == null)
+        {
+            return false;
+        }
+
+        if (targetCount <= 0 || itemButtonPool.Count >= targetCount)
+        {
+            return false;
+        }
+
+        buttonPoolWarmupTargetCount = targetCount;
+        buttonPoolWarmupRunning = true;
+        buttonPoolWarmupCoroutine = instance.StartCoroutine(WarmupButtonPoolGradually(listContent, reason));
+        VerboseLog($"Button pool warmup started ({reason}). Target={targetCount}, Existing={itemButtonPool.Count}");
+        return true;
+    }
+
+    private static int CalculateButtonPoolWarmupTarget(int sourceCount)
+    {
+        if (sourceCount <= 0)
+        {
+            return 0;
+        }
+
+        int visibleTarget = CalculateVirtualizedVisiblePoolTarget();
+        int minimumTarget = VirtualizedColumnCount * 4;
+        int warmupTarget = Mathf.Max(minimumTarget, visibleTarget);
+        return Mathf.Min(sourceCount, warmupTarget);
+    }
+
+    private static IEnumerator WarmupButtonPoolGradually(RectTransform listContent, string reason)
+    {
+        const int buttonsPerFrame = 2;
+        int budget = buttonsPerFrame;
+
+        yield return null;
+
+        while (itemButtonPool.Count < buttonPoolWarmupTargetCount)
+        {
+            EnsurePooledItemButton(itemButtonPool.Count, listContent);
+            budget--;
+
+            if (budget <= 0)
+            {
+                budget = buttonsPerFrame;
+                yield return null;
+            }
+        }
+
+        buttonPoolWarmupRunning = false;
+        buttonPoolWarmupCoroutine = null;
+        VerboseLog($"Button pool warmup completed ({reason}). Count={itemButtonPool.Count}");
     }
 
     private static string GetPreloadStatusText()
