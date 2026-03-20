@@ -4442,9 +4442,27 @@ public partial class Plugin : BaseUnityPlugin
         Vector3 spawnPos = player.Center + player.transform.forward * configSpawnDistance.Value;
 
         VerboseLog($"Spawn request: prefab='{prefab.name}', position={spawnPos}, online={PhotonNetwork.IsConnected}, inRoom={PhotonNetwork.InRoom}");
+        VerboseLog($"Spawn context: offlineMode={PhotonNetwork.OfflineMode}, isMasterClient={PhotonNetwork.IsMasterClient}, localPlayer={(PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber.ToString() : "null")}, localCharacterPhotonView={(player.photonView != null ? player.photonView.ViewID.ToString() : "null")}, isLocalCharacter={player.IsLocal}");
 
         try
         {
+            if (!PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected && PhotonNetwork.InRoom)
+            {
+                VerboseLog($"Multiplayer spawn path selected for '{prefab.name}'. GameUtils.instance={(GameUtils.instance != null ? "ready" : "null")}");
+
+                if (GameUtils.instance == null)
+                {
+                    Log.LogError($"[ItemBrowser] GameUtils.instance is null, cannot spawn {prefab.name} in multiplayer.");
+                    return;
+                }
+
+                VerboseLog($"Calling GameUtils.InstantiateAndGrab for '{prefab.name}' with characterView={(player.photonView != null ? player.photonView.ViewID.ToString() : "null")}");
+                GameUtils.instance.InstantiateAndGrab(prefab, player, 0);
+                VerboseLog($"Spawn requested via GameUtils.InstantiateAndGrab: {prefab.name}");
+                return;
+            }
+
+            VerboseLog($"Offline/local room spawn path selected for '{prefab.name}'.");
             PhotonNetwork.InstantiateItemRoom(prefab.name, spawnPos, Quaternion.identity);
             VerboseLog($"Spawn success: {prefab.name}");
         }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 - 2026-03-20
+- Fixed multiplayer item spawning for non-host players.
+- Switched online spawning to PEAK's built-in GameUtils.InstantiateAndGrab network flow.
+- Removed the requirement for the host to install ItemBrowser for client spawn requests to succeed.
+- Added extra spawn diagnostics to verify multiplayer runtime state and native spawn path selection.
+
 ## 0.2.1 - 2026-02-09
 - Optimized first open (`F5`) stutter with staged first-frame rendering and earlier menu warmup.
 - Reworked list virtualization to preserve the existing two-column UI skeleton and core interactions.

@@ -11,6 +11,8 @@ An in-game item browser and spawner for PEAK, built with PEAKLib.UI.
 - Search by localized item name or prefab name.
 - Two-level filtering: `All / Food / Weapon`, with sub-categories for Food and Weapon.
 - Click an entry to spawn it in front of your character.
+- Multiplayer spawn support for non-host players.
+- Uses PEAK's built-in GameUtils.InstantiateAndGrab network flow, so the host does not need ItemBrowser installed.
 - Multilingual UI support:
   - Item names are resolved from game localization keys via `ItemNameKeyMap.json`.
   - Mod-specific texts are loaded from `Localized_Text.json` and injected into `LocalizedText.MAIN_TABLE`.
