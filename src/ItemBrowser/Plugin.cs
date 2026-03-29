@@ -19,20 +19,21 @@ using UnityEngine;
 using UnityEngine.UI;
 
 using Zorro.Core;
+using Zorro.Core.CLI;
 using Zorro.Settings;
 
 namespace ItemBrowser;
 
 [BepInAutoPlugin]
 [BepInDependency(PEAKLib.UI.UIPlugin.Id)]
+[ConsoleClassCustomizer("ItemBrowser")]
 public partial class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log { get; private set; } = null!;
 
-    private static ConfigEntry<KeyCode> configToggleKey;
-    private static ConfigEntry<float> configSpawnDistance;
-    private static ConfigEntry<bool> configAllowOnline;
-    private static ConfigEntry<bool> configVerboseLogs;
+    private static ConfigEntry<KeyCode>? configToggleKey;
+    private static ConfigEntry<bool>? configAllowOnline;
+    private static ConfigEntry<bool>? configVerboseLogs;
 
     private static PeakCustomPage? page;
     private static PeakText? headerTitleText;
@@ -72,7 +73,6 @@ public partial class Plugin : BaseUnityPlugin
     private static string currentSearch = string.Empty;
     private static MajorCategory currentMajorFilter = MajorCategory.All;
     private static ItemCategory? currentSubCategoryFilter;
-    private static bool templatesLogged;
     private static PeakHorizontalTabs? majorTabs;
     private static PeakHorizontalTabs? subCategoryTabs;
     private static GameObject? subCategoryTabsRoot;
@@ -86,8 +86,6 @@ public partial class Plugin : BaseUnityPlugin
     private static readonly List<ItemEntry> itemEntries = new();
     private static readonly Dictionary<string, Sprite?> itemIconCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<int, Sprite> generatedTextureSpriteCache = new();
-    private static readonly Dictionary<string, List<Texture2D>> textureNameIndex = new(StringComparer.OrdinalIgnoreCase);
-    private static bool textureNameIndexBuilt;
     private static GridLayoutGroup? itemGridLayout;
     private static bool itemListInitialized;
     private static Coroutine? listRenderCoroutine;
@@ -189,11 +187,11 @@ public partial class Plugin : BaseUnityPlugin
         instance = this;
         Log = Logger;
         configToggleKey = ((BaseUnityPlugin)this).Config.Bind<KeyCode>("ItemBrowser", "Toggle Key", KeyCode.F5, "Press to open/close the item browser.");
-        configSpawnDistance = ((BaseUnityPlugin)this).Config.Bind<float>("ItemBrowser", "Spawn Distance", 1.5f, "Distance in front of the player to spawn items.");
         configAllowOnline = ((BaseUnityPlugin)this).Config.Bind<bool>("ItemBrowser", "Allow Online Spawn", true, "Allow spawning items while online.");
         configVerboseLogs = ((BaseUnityPlugin)this).Config.Bind<bool>("ItemBrowser", "Verbose Logs", false, "Enable detailed category/UI/spawn logs.");
 
         LoadLocalizedText();
+        RefreshConsoleCommands();
     }
 
     private void OnDestroy()
@@ -203,38 +201,11 @@ public partial class Plugin : BaseUnityPlugin
             instance = null;
         }
 
-        if (itemPreloadCoroutine != null)
-        {
-            StopCoroutine(itemPreloadCoroutine);
-            itemPreloadCoroutine = null;
-        }
-
+        StopTrackedCoroutine(ref itemPreloadCoroutine);
         itemPreloadRunning = false;
-
-        if (iconPrewarmCoroutine != null)
-        {
-            StopCoroutine(iconPrewarmCoroutine);
-            iconPrewarmCoroutine = null;
-        }
-
-        iconPrewarmRunning = false;
-        iconPrewarmCompleted = false;
-
-        if (listRenderCoroutine != null)
-        {
-            StopCoroutine(listRenderCoroutine);
-            listRenderCoroutine = null;
-        }
-
-        listRenderRunning = false;
-
-        if (buttonPoolWarmupCoroutine != null)
-        {
-            StopCoroutine(buttonPoolWarmupCoroutine);
-            buttonPoolWarmupCoroutine = null;
-        }
-
-        buttonPoolWarmupRunning = false;
+        ResetIconPrewarmState(stopCoroutine: true);
+        StopListRenderCore(incrementGeneration: false);
+        ResetButtonPoolWarmupState(stopCoroutine: true);
     }
 
     private void Update()
@@ -320,7 +291,6 @@ public partial class Plugin : BaseUnityPlugin
 
         BuildUI();
         uiBuilt = true;
-        LogAvailableTemplates();
         VerboseLog("UI warmup build completed.");
     }
 
@@ -406,24 +376,9 @@ public partial class Plugin : BaseUnityPlugin
 
     private static void InvalidateItemListState(string reason)
     {
-        if (itemPreloadCoroutine != null && instance != null)
-        {
-            instance.StopCoroutine(itemPreloadCoroutine);
-        }
-
-        if (iconPrewarmCoroutine != null && instance != null)
-        {
-            instance.StopCoroutine(iconPrewarmCoroutine);
-        }
-
-        itemPreloadCoroutine = null;
+        StopTrackedCoroutine(ref itemPreloadCoroutine);
         itemPreloadRunning = false;
-        iconPrewarmCoroutine = null;
-        iconPrewarmRunning = false;
-        iconPrewarmCompleted = false;
-        iconPrewarmProcessedCount = 0;
-        iconPrewarmResolvedCount = 0;
-        nextIconPrewarmCheckTime = 0f;
+        ResetIconPrewarmState(stopCoroutine: true);
         itemListInitialized = false;
         itemPreloadTotalCount = 0;
         itemPreloadProcessedCount = 0;
@@ -443,8 +398,6 @@ public partial class Plugin : BaseUnityPlugin
         itemEntries.Clear();
         itemIconCache.Clear();
         generatedTextureSpriteCache.Clear();
-        textureNameIndex.Clear();
-        textureNameIndexBuilt = false;
         itemButtonPool.Clear();
         activeRenderEntries.Clear();
         virtualizedPendingDataIndices.Clear();
@@ -454,16 +407,7 @@ public partial class Plugin : BaseUnityPlugin
         suppressScrollUpdate = false;
         virtualizedScrollDirty = false;
         nextVirtualizedScrollApplyTime = 0f;
-        buttonPoolWarmupTargetCount = 0;
-        nextButtonPoolWarmupCheckTime = 0f;
-
-        if (buttonPoolWarmupCoroutine != null && instance != null)
-        {
-            instance.StopCoroutine(buttonPoolWarmupCoroutine);
-        }
-
-        buttonPoolWarmupCoroutine = null;
-        buttonPoolWarmupRunning = false;
+        ResetButtonPoolWarmupState(stopCoroutine: true);
 
         VerboseLog(reason);
         MarkListDirty(reason);
@@ -518,7 +462,6 @@ public partial class Plugin : BaseUnityPlugin
 
         BuildUI();
         uiBuilt = true;
-        LogAvailableTemplates();
         VerboseLog("UI build completed.");
         return true;
     }
@@ -709,47 +652,6 @@ public partial class Plugin : BaseUnityPlugin
 
         setter.Invoke(null, new[] { value });
         return true;
-    }
-
-    private static void LogAvailableTemplates()
-    {
-        if (templatesLogged)
-        {
-            return;
-        }
-
-        templatesLogged = true;
-
-        try
-        {
-            var templateType = typeof(Templates);
-            var props = templateType.GetProperties(BindingFlags.Public | BindingFlags.Static);
-            if (props.Length == 0)
-            {
-                Log.LogInfo("[ItemBrowser] Templates has no public static properties.");
-                return;
-            }
-
-            foreach (var prop in props)
-            {
-                object? value = null;
-                try
-                {
-                    value = prop.GetValue(null);
-                }
-                catch
-                {
-                    // ignore
-                }
-
-                string status = value == null ? "null" : "ok";
-                Log.LogInfo($"[ItemBrowser] Template {prop.Name} ({prop.PropertyType.Name}) = {status}");
-            }
-        }
-        catch (Exception e)
-        {
-            Log.LogWarning($"[ItemBrowser] Failed to enumerate Templates: {e.GetType().Name} {e.Message}");
-        }
     }
 
     private static void VerboseLog(string message)
@@ -1240,15 +1142,7 @@ public partial class Plugin : BaseUnityPlugin
     private static void MarkListDirty(string? reason = null)
     {
         listNeedsRefresh = true;
-        listRenderRunning = false;
-        listRenderGeneration++;
-
-        if (listRenderCoroutine != null && instance != null)
-        {
-            instance.StopCoroutine(listRenderCoroutine);
-            listRenderCoroutine = null;
-        }
-
+        StopListRenderCore(incrementGeneration: true);
         firstOpenPrimed = false;
         postSpawnPrimeLocked = false;
 
@@ -1794,15 +1688,7 @@ public partial class Plugin : BaseUnityPlugin
 
     private static void CancelListRender()
     {
-        listRenderGeneration++;
-
-        if (listRenderCoroutine != null && instance != null)
-        {
-            instance.StopCoroutine(listRenderCoroutine);
-            listRenderCoroutine = null;
-        }
-
-        listRenderRunning = false;
+        StopListRenderCore(incrementGeneration: true);
     }
 
     private static PooledItemButton EnsurePooledItemButton(int index, RectTransform listContent)
@@ -2273,30 +2159,8 @@ public partial class Plugin : BaseUnityPlugin
         itemEntries.Clear();
         itemIconCache.Clear();
         generatedTextureSpriteCache.Clear();
-        textureNameIndex.Clear();
-        textureNameIndexBuilt = false;
-
-        if (iconPrewarmCoroutine != null)
-        {
-            instance.StopCoroutine(iconPrewarmCoroutine);
-        }
-
-        iconPrewarmCoroutine = null;
-        iconPrewarmRunning = false;
-        iconPrewarmCompleted = false;
-        iconPrewarmProcessedCount = 0;
-        iconPrewarmResolvedCount = 0;
-        nextIconPrewarmCheckTime = 0f;
-        buttonPoolWarmupTargetCount = 0;
-        nextButtonPoolWarmupCheckTime = 0f;
-
-        if (buttonPoolWarmupCoroutine != null)
-        {
-            instance.StopCoroutine(buttonPoolWarmupCoroutine);
-        }
-
-        buttonPoolWarmupCoroutine = null;
-        buttonPoolWarmupRunning = false;
+        ResetIconPrewarmState(stopCoroutine: true);
+        ResetButtonPoolWarmupState(stopCoroutine: true);
 
         MarkListDirty($"Item preload started ({reason})");
 
@@ -2331,11 +2195,9 @@ public partial class Plugin : BaseUnityPlugin
             {
                 if (item != null)
                 {
-                    string localizedName = GetLocalizedItemName(item);
-                    string displayName = string.IsNullOrWhiteSpace(localizedName) ? item.name : localizedName;
-                    displayName = GetDisplayNameOverride(item, displayName);
+                    string displayName = GetResolvedItemDisplayName(item);
 
-                    if (!ShouldHideItemFromBrowser(item, displayName))
+                    if (!ShouldHideItemFromBrowser(item))
                     {
                         ItemCategory category = GetCategory(item, displayName);
                         Sprite? icon = GetItemIcon(item, allowHeavyFallback: false);
@@ -2569,6 +2431,25 @@ public partial class Plugin : BaseUnityPlugin
 
             if (icon == null)
             {
+                var uiImage = item.GetComponentInChildren<Image>(true);
+                if (uiImage != null)
+                {
+                    icon = uiImage.sprite;
+                    if (probe != null)
+                    {
+                        probe.Add(icon != null
+                            ? $"UI.Image(sprite)={DescribeSprite(icon)}"
+                            : "UI.Image(sprite)=null");
+                    }
+                }
+                else if (probe != null)
+                {
+                    probe.Add("UI.Image=missing");
+                }
+            }
+
+            if (icon == null)
+            {
                 var spriteRenderer = item.GetComponentInChildren<SpriteRenderer>(true);
                 if (spriteRenderer != null)
                 {
@@ -2588,30 +2469,10 @@ public partial class Plugin : BaseUnityPlugin
 
             if (allowHeavyFallback && icon == null)
             {
-                icon = TryFindTextureByName(item, probe);
-            }
-
-            if (allowHeavyFallback && icon == null)
-            {
                 icon = TryExtractMaterialTextureSprite(item, probe);
-            }
-
-            if (icon == null)
-            {
-                var uiImage = item.GetComponentInChildren<Image>(true);
-                if (uiImage != null)
+                if (icon == null && probe != null)
                 {
-                    icon = uiImage.sprite;
-                    if (probe != null)
-                    {
-                        probe.Add(icon != null
-                            ? $"UI.Image(sprite)={DescribeSprite(icon)}"
-                            : "UI.Image(sprite)=null");
-                    }
-                }
-                else if (probe != null)
-                {
-                    probe.Add("UI.Image=missing");
+                    probe.Add("HeavyFallback(material)=miss");
                 }
             }
         }
@@ -3074,160 +2935,6 @@ public partial class Plugin : BaseUnityPlugin
             || lowered.Contains("face");
     }
 
-    private static Sprite? TryFindTextureByName(Item item, List<string>? probe)
-    {
-        if (item == null)
-        {
-            return null;
-        }
-
-        EnsureTextureNameIndex();
-        if (textureNameIndex.Count == 0)
-        {
-            probe?.Add("TextureNameIndex=empty");
-            return null;
-        }
-
-        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string prefabName = item.name ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(prefabName))
-        {
-            keys.Add(prefabName);
-            keys.Add(prefabName.Replace("_", " "));
-            int variantIndex = prefabName.IndexOf(" Variant", StringComparison.OrdinalIgnoreCase);
-            if (variantIndex > 0)
-            {
-                keys.Add(prefabName.Substring(0, variantIndex));
-            }
-        }
-
-        Texture2D? bestTexture = null;
-        int bestScore = int.MinValue;
-        string bestSource = string.Empty;
-
-        foreach (string raw in keys)
-        {
-            string token = NormalizeLookupToken(raw);
-            if (string.IsNullOrEmpty(token))
-            {
-                continue;
-            }
-
-            if (!textureNameIndex.TryGetValue(token, out var textures) || textures == null)
-            {
-                continue;
-            }
-
-            for (int i = 0; i < textures.Count; i++)
-            {
-                Texture2D tex = textures[i];
-                if (tex == null)
-                {
-                    continue;
-                }
-
-                int score = ScoreTextureCandidate(prefabName, tex, $"TextureNameIndex.{token}");
-                if (IsLikelyGenericTextureName(tex.name))
-                {
-                    score -= 120;
-                }
-
-                score += 220; // strong boost for exact name-token matches.
-                probe?.Add($"TextureNameIndex.{token}=texture('{tex.name}') score={score}");
-
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestTexture = tex;
-                    bestSource = $"TextureNameIndex.{token}";
-                }
-            }
-        }
-
-        if (bestTexture == null)
-        {
-            return null;
-        }
-
-        if (bestScore < 120)
-        {
-            probe?.Add($"TextureNameIndex.skip(score={bestScore})");
-            return null;
-        }
-
-        probe?.Add($"TextureNameIndex.choose(score={bestScore}):{bestSource}");
-        return ConvertTextureToSprite(bestTexture, bestSource, probe);
-    }
-
-    private static void EnsureTextureNameIndex()
-    {
-        if (textureNameIndexBuilt)
-        {
-            return;
-        }
-
-        textureNameIndexBuilt = true;
-        textureNameIndex.Clear();
-
-        try
-        {
-            Texture2D[] textures = Resources.FindObjectsOfTypeAll<Texture2D>();
-            if (textures == null || textures.Length == 0)
-            {
-                return;
-            }
-
-            for (int i = 0; i < textures.Length; i++)
-            {
-                Texture2D texture = textures[i];
-                if (texture == null || string.IsNullOrWhiteSpace(texture.name))
-                {
-                    continue;
-                }
-
-                string token = NormalizeLookupToken(texture.name);
-                if (string.IsNullOrEmpty(token))
-                {
-                    continue;
-                }
-
-                if (!textureNameIndex.TryGetValue(token, out var list))
-                {
-                    list = new List<Texture2D>();
-                    textureNameIndex[token] = list;
-                }
-
-                list.Add(texture);
-            }
-
-            VerboseLog($"TextureNameIndex built: {textureNameIndex.Count} keys");
-        }
-        catch (Exception e)
-        {
-            Log.LogWarning($"[ItemBrowser] Failed to build texture index: {e.GetType().Name} {e.Message}");
-        }
-    }
-
-    private static string NormalizeLookupToken(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return string.Empty;
-        }
-
-        var chars = new List<char>(value.Length);
-        for (int i = 0; i < value.Length; i++)
-        {
-            char c = value[i];
-            if (char.IsLetterOrDigit(c))
-            {
-                chars.Add(char.ToLowerInvariant(c));
-            }
-        }
-
-        return new string(chars.ToArray());
-    }
-
     private static void EvaluateTextureCandidate(
         string itemName,
         Texture2D? texture,
@@ -3252,24 +2959,6 @@ public partial class Plugin : BaseUnityPlugin
             bestTexture = texture;
             bestSource = source;
         }
-    }
-
-    private static bool IsLikelyGenericTextureName(string textureName)
-    {
-        if (string.IsNullOrWhiteSpace(textureName))
-        {
-            return true;
-        }
-
-        string lowered = textureName.ToLowerInvariant();
-        return lowered.StartsWith("a_texture")
-            || lowered.StartsWith("a_paint")
-            || lowered.StartsWith("a_noise")
-            || lowered.Contains("noise")
-            || lowered.Contains("default")
-            || lowered.Contains("gradient")
-            || lowered.Contains("cloud")
-            || lowered.Contains("checker");
     }
 
     private static int ScoreTextureCandidate(string itemName, Texture2D texture, string source)
@@ -3468,7 +3157,7 @@ public partial class Plugin : BaseUnityPlugin
         return displayName;
     }
 
-    private static bool ShouldHideItemFromBrowser(Item item, string displayName)
+    private static bool ShouldHideItemFromBrowser(Item item)
     {
         if (item == null)
         {
@@ -3501,6 +3190,66 @@ public partial class Plugin : BaseUnityPlugin
         }
 
         return false;
+    }
+
+    private static void StopTrackedCoroutine(ref Coroutine? coroutine)
+    {
+        if (coroutine == null)
+        {
+            return;
+        }
+
+        if (instance != null)
+        {
+            instance.StopCoroutine(coroutine);
+        }
+
+        coroutine = null;
+    }
+
+    private static void ResetIconPrewarmState(bool stopCoroutine)
+    {
+        if (stopCoroutine)
+        {
+            StopTrackedCoroutine(ref iconPrewarmCoroutine);
+        }
+        else
+        {
+            iconPrewarmCoroutine = null;
+        }
+
+        iconPrewarmRunning = false;
+        iconPrewarmCompleted = false;
+        iconPrewarmProcessedCount = 0;
+        iconPrewarmResolvedCount = 0;
+        nextIconPrewarmCheckTime = 0f;
+    }
+
+    private static void ResetButtonPoolWarmupState(bool stopCoroutine)
+    {
+        if (stopCoroutine)
+        {
+            StopTrackedCoroutine(ref buttonPoolWarmupCoroutine);
+        }
+        else
+        {
+            buttonPoolWarmupCoroutine = null;
+        }
+
+        buttonPoolWarmupRunning = false;
+        buttonPoolWarmupTargetCount = 0;
+        nextButtonPoolWarmupCheckTime = 0f;
+    }
+
+    private static void StopListRenderCore(bool incrementGeneration)
+    {
+        if (incrementGeneration)
+        {
+            listRenderGeneration++;
+        }
+
+        StopTrackedCoroutine(ref listRenderCoroutine);
+        listRenderRunning = false;
     }
 
     private static HashSet<string> BuildHiddenPrefabNameSet()
@@ -3645,97 +3394,7 @@ public partial class Plugin : BaseUnityPlugin
             }
         }
 
-        int bestScore = int.MinValue;
-        string bestAlias = string.Empty;
-        ItemCategory bestCategory = default;
-
-        for (int i = 0; i < candidateKeys.Count; i++)
-        {
-            string key = candidateKeys[i];
-            foreach (var pair in wikiCategoryOverrides)
-            {
-                int score = ScoreCategoryKeyMatch(key, pair.Key);
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestAlias = pair.Key;
-                    bestCategory = pair.Value;
-                }
-            }
-        }
-
-        if (bestScore >= 260)
-        {
-            category = bestCategory;
-            VerboseLog($"Category fuzzy hit: score={bestScore}, alias='{bestAlias}', prefab='{item.name}', display='{displayName}' -> {category}");
-            return true;
-        }
-
         return false;
-    }
-
-    private static int ScoreCategoryKeyMatch(string candidate, string alias)
-    {
-        if (string.IsNullOrWhiteSpace(candidate) || string.IsNullOrWhiteSpace(alias))
-        {
-            return int.MinValue;
-        }
-
-        if (string.Equals(candidate, alias, StringComparison.OrdinalIgnoreCase))
-        {
-            return 1000;
-        }
-
-        int minLength = Math.Min(candidate.Length, alias.Length);
-        int score = 0;
-
-        if (candidate.Contains(alias, StringComparison.OrdinalIgnoreCase)
-            || alias.Contains(candidate, StringComparison.OrdinalIgnoreCase))
-        {
-            score = Math.Max(score, 280 + minLength * 4);
-        }
-
-        int overlap = LongestCommonSubstringLength(candidate, alias);
-        score = Math.Max(score, overlap * 24 - Math.Abs(candidate.Length - alias.Length) * 3);
-
-        if (minLength >= 6)
-        {
-            if (candidate.StartsWith(alias.Substring(0, 6), StringComparison.OrdinalIgnoreCase)
-                || alias.StartsWith(candidate.Substring(0, 6), StringComparison.OrdinalIgnoreCase))
-            {
-                score += 30;
-            }
-        }
-
-        return score;
-    }
-
-    private static int LongestCommonSubstringLength(string a, string b)
-    {
-        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
-        {
-            return 0;
-        }
-
-        int[,] dp = new int[a.Length + 1, b.Length + 1];
-        int best = 0;
-
-        for (int i = 1; i <= a.Length; i++)
-        {
-            for (int j = 1; j <= b.Length; j++)
-            {
-                if (char.ToLowerInvariant(a[i - 1]) == char.ToLowerInvariant(b[j - 1]))
-                {
-                    dp[i, j] = dp[i - 1, j - 1] + 1;
-                    if (dp[i, j] > best)
-                    {
-                        best = dp[i, j];
-                    }
-                }
-            }
-        }
-
-        return best;
     }
 
     private static IEnumerable<string> GetCategoryCandidateKeys(Item item, string displayName)
@@ -4292,9 +3951,7 @@ public partial class Plugin : BaseUnityPlugin
         for (int i = 0; i < itemEntries.Count; i++)
         {
             ItemEntry entry = itemEntries[i];
-            string localizedName = GetLocalizedItemName(entry.Prefab);
-            string displayName = string.IsNullOrWhiteSpace(localizedName) ? entry.PrefabName : localizedName;
-            displayName = GetDisplayNameOverride(entry.Prefab, displayName);
+            string displayName = GetResolvedItemDisplayName(entry.Prefab);
 
             if (!string.Equals(entry.DisplayName, displayName, StringComparison.Ordinal))
             {
@@ -4416,59 +4073,155 @@ public partial class Plugin : BaseUnityPlugin
         }
     }
 
+    [ConsoleCommand(false)]
+    public static void Spawn(Item item)
+    {
+        if (item == null)
+        {
+            ReportConsoleWarning("[ItemBrowser] Spawn command failed: resolved item was null.");
+            return;
+        }
+
+        if (!TrySpawnItem(item, out string spawnMessage))
+        {
+            ReportConsoleWarning(spawnMessage);
+            return;
+        }
+
+        ReportConsoleInfo(spawnMessage);
+    }
+
     private static void SpawnItem(Item prefab)
     {
+        TrySpawnItem(prefab, out _);
+    }
+
+    private static bool TrySpawnItem(Item prefab, out string statusMessage)
+    {
+        statusMessage = string.Empty;
+
         if (prefab == null)
         {
-            return;
+            statusMessage = "[ItemBrowser] Item prefab is null.";
+            return false;
         }
 
         Character player = Character.localCharacter;
         if (player == null)
         {
-            Log.LogWarning("[ItemBrowser] No local character available. Enter a match to spawn items.");
-            return;
+            statusMessage = "[ItemBrowser] No local character available. Enter a match to spawn items.";
+            Log.LogWarning(statusMessage);
+            return false;
         }
 
-        if (!configAllowOnline.Value)
+        if (configAllowOnline != null && !configAllowOnline.Value)
         {
             if (!PhotonNetwork.OfflineMode && (!PhotonNetwork.IsConnected || !PhotonNetwork.InRoom))
             {
-                Log.LogWarning("[ItemBrowser] Online spawn disabled or not in room.");
-                return;
+                statusMessage = "[ItemBrowser] Online spawn disabled or not in room.";
+                Log.LogWarning(statusMessage);
+                return false;
             }
         }
 
-        Vector3 spawnPos = player.Center + player.transform.forward * configSpawnDistance.Value;
-
-        VerboseLog($"Spawn request: prefab='{prefab.name}', position={spawnPos}, online={PhotonNetwork.IsConnected}, inRoom={PhotonNetwork.InRoom}");
+        VerboseLog($"Spawn request: prefab='{prefab.name}', online={PhotonNetwork.IsConnected}, inRoom={PhotonNetwork.InRoom}");
         VerboseLog($"Spawn context: offlineMode={PhotonNetwork.OfflineMode}, isMasterClient={PhotonNetwork.IsMasterClient}, localPlayer={(PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber.ToString() : "null")}, localCharacterPhotonView={(player.photonView != null ? player.photonView.ViewID.ToString() : "null")}, isLocalCharacter={player.IsLocal}");
 
         try
         {
-            if (!PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected && PhotonNetwork.InRoom)
+            if (GameUtils.instance != null)
             {
-                VerboseLog($"Multiplayer spawn path selected for '{prefab.name}'. GameUtils.instance={(GameUtils.instance != null ? "ready" : "null")}");
-
-                if (GameUtils.instance == null)
-                {
-                    Log.LogError($"[ItemBrowser] GameUtils.instance is null, cannot spawn {prefab.name} in multiplayer.");
-                    return;
-                }
-
+                string spawnMode = !PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected && PhotonNetwork.InRoom
+                    ? "Multiplayer"
+                    : "Offline/local";
+                VerboseLog($"{spawnMode} grab path selected for '{prefab.name}'. GameUtils.instance=ready");
                 VerboseLog($"Calling GameUtils.InstantiateAndGrab for '{prefab.name}' with characterView={(player.photonView != null ? player.photonView.ViewID.ToString() : "null")}");
                 GameUtils.instance.InstantiateAndGrab(prefab, player, 0);
                 VerboseLog($"Spawn requested via GameUtils.InstantiateAndGrab: {prefab.name}");
-                return;
+                statusMessage = $"[ItemBrowser] Spawned {FormatItemCommandLabel(prefab)}.";
+                return true;
             }
 
-            VerboseLog($"Offline/local room spawn path selected for '{prefab.name}'.");
-            PhotonNetwork.InstantiateItemRoom(prefab.name, spawnPos, Quaternion.identity);
-            VerboseLog($"Spawn success: {prefab.name}");
+            if (!PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected && PhotonNetwork.InRoom)
+            {
+                statusMessage = $"[ItemBrowser] GameUtils.instance is null, cannot spawn {prefab.name} in multiplayer.";
+                Log.LogError(statusMessage);
+                return false;
+            }
+
+            statusMessage = $"[ItemBrowser] GameUtils.instance is null, cannot spawn {prefab.name} in offline mode.";
+            Log.LogError(statusMessage);
+            return false;
         }
         catch (Exception e)
         {
-            Log.LogError($"[ItemBrowser] Spawn failed for {prefab.name}: {e.Message}");
+            statusMessage = $"[ItemBrowser] Spawn failed for {prefab.name}: {e.Message}";
+            Log.LogError(statusMessage);
+            return false;
+        }
+    }
+
+    private static string GetResolvedItemDisplayName(Item item)
+    {
+        if (item == null)
+        {
+            return string.Empty;
+        }
+
+        string localizedName = GetLocalizedItemName(item);
+        string displayName = string.IsNullOrWhiteSpace(localizedName) ? item.name ?? string.Empty : localizedName;
+        return GetDisplayNameOverride(item, displayName);
+    }
+
+    private static string FormatItemCommandLabel(Item item)
+    {
+        if (item == null)
+        {
+            return "<null>";
+        }
+
+        string prefabName = NormalizeItemNameForMap(item.name ?? string.Empty);
+        string displayName = GetResolvedItemDisplayName(item).Trim();
+        if (string.IsNullOrWhiteSpace(displayName) || string.Equals(displayName, prefabName, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"'{prefabName}'";
+        }
+
+        return $"'{displayName}' ({prefabName})";
+    }
+
+    private static void ReportConsoleInfo(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        Log.LogInfo(message);
+        Debug.Log(message);
+    }
+
+    private static void ReportConsoleWarning(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        Log.LogWarning(message);
+        Debug.LogWarning(message);
+    }
+
+    private static void RefreshConsoleCommands()
+    {
+        try
+        {
+            ConsoleHandler.Initialize(ConsoleHandler.ScanForConsoleCommands(), ConsoleHandler.ScanForTypeParsers());
+            VerboseLog("Console commands refreshed.");
+        }
+        catch (Exception e)
+        {
+            Log.LogWarning($"[ItemBrowser] Failed to refresh console commands: {e.GetType().Name} {e.Message}");
         }
     }
 
@@ -4517,6 +4270,11 @@ public partial class Plugin : BaseUnityPlugin
 
     private static bool IsTogglePressed()
     {
+        if (configToggleKey == null)
+        {
+            return false;
+        }
+
         KeyCode key = configToggleKey.Value;
 
         if (TryGetInputSystemKeyDown(key, out bool pressedByInputSystem))
