@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3 - 2026-03-29
+- Unified offline and multiplayer item spawning through PEAK's built-in `GameUtils.InstantiateAndGrab` flow.
+- Added the `ItemBrowser.Spawn <Item>` in-game console command for use with mods such as `Console Unlocker`.
+- Documented that PEAK's current console command matching is case-sensitive, so command names must be entered exactly.
+- Simplified internal fallback logic:
+  - Removed the old room-position spawn fallback.
+  - Reduced icon/category fallback complexity to keep the browser codebase easier to maintain.
+
 ## 0.2.2 - 2026-03-20
 - Fixed multiplayer item spawning for non-host players.
 - Switched online spawning to PEAK's built-in GameUtils.InstantiateAndGrab network flow.
