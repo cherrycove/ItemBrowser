@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.2.4 - 2026-04-03
+- Added support for redirecting spawned items to the currently observed teammate while dead or in ghost/spectate mode.
+
 ## 0.2.3 - 2026-03-29
 - Unified offline and multiplayer item spawning through PEAK's built-in `GameUtils.InstantiateAndGrab` flow.
 - Added the `ItemBrowser.Spawn <Item>` in-game console command for use with mods such as `Console Unlocker`.
