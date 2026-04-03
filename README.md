@@ -13,6 +13,7 @@ An in-game item browser and spawner for PEAK, built with PEAKLib.UI.
 - Click an entry to spawn the item through PEAK's built-in `GameUtils.InstantiateAndGrab` flow.
 - Offline and multiplayer spawning now use the same grab-based path for more consistent behavior.
 - Multiplayer spawn support for non-host players.
+- When dead or in ghost/spectate mode, spawned items can be redirected to the currently observed teammate.
 - Uses PEAK's built-in GameUtils.InstantiateAndGrab network flow, so the host does not need ItemBrowser installed.
 - Optional in-game console command support via `Console Unlocker`:
   - `ItemBrowser.Spawn <Item>`

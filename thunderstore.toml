@@ -4,8 +4,8 @@ schemaVersion = "0.0.1"
 [package]
 namespace = "cherrycove"
 name = "ItemBrowser"
-versionNumber = "0.2.3"
-description = "In-game item browser for PEAK with search, categories, multilingual UI, unified offline/multiplayer spawning, and optional console spawn support (F5)."
+versionNumber = "0.2.4"
+description = "In-game item browser for PEAK with search, unified offline/multiplayer spawning, ghost spectate teammate item delivery, and optional console spawn support (F5)."
 websiteUrl = "https://github.com/cherrycove/ItemBrowser"
 containsNsfwContent = false
 [package.dependencies]

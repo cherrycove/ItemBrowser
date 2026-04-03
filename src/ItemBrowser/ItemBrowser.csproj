@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>com.github.cherrycove.ItemBrowser</AssemblyName>
     <AssemblyTitle>ItemBrowser</AssemblyTitle>
-    <Version>0.2.3</Version>
+    <Version>0.2.4</Version>
   </PropertyGroup>
 
   <ItemGroup>

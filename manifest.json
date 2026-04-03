@@ -1,8 +1,8 @@
 {
   "name": "ItemBrowser",
-  "version_number": "0.2.3",
+  "version_number": "0.2.4",
   "website_url": "https://github.com/cherrycove/ItemBrowser",
-  "description": "In-game item browser for PEAK with search, categories, unified offline/multiplayer spawning, and an optional console spawn command (F5).",
+  "description": "In-game item browser for PEAK with search, unified offline/multiplayer spawning, ghost spectate teammate item delivery, and an optional console spawn command (F5).",
   "dependencies": [
     "BepInEx-BepInExPack_PEAK-5.4.2403",
     "PEAKModding-PEAKLib_Core-1.7.2",
